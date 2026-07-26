@@ -1,0 +1,40 @@
+# ------------------------------------------------------------------------
+# Tree-DETR conda environment  (Linux + NVIDIA GPU)
+# ------------------------------------------------------------------------
+# Tuned for the target server: Linux, 2x RTX 3090 (Ampere, sm_86),
+# driver CUDA 13.2.  Replaces the README's ancient stack (py3.7 / torch1.5.1
+# / cuda9.2), which cannot run on Ampere/Ada/Blackwell GPUs at all.
+#
+# Stack: PyTorch 2.4.1 + torchvision 0.19.1 + CUDA 12.1 runtime & toolkit.
+#   * cu121 has mature wheels, fully supports sm_86, and the base repo's
+#     MSDeformAttn CUDA op compiles against it with no source changes.
+#   * cuda-toolkit is included so `nvcc` is available (and matches torch's
+#     CUDA) when you compile models/ops.
+#
+# NOTE (Blackwell / RTX 5090, sm_120): this env will NOT run on the 5090.
+# If you must use it, switch to pytorch>=2.7 + pytorch-cuda=12.8 and compile
+# the op with TORCH_CUDA_ARCH_LIST="12.0".
+#
+# Create:   conda env create -f environment.yml
+# Activate: conda activate tree-detr
+# ------------------------------------------------------------------------
+name: tree-detr
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  # --- deep learning stack (cu121) ---
+  - pytorch=2.4.1
+  - torchvision=0.19.1
+  - pytorch-cuda=12.1        # CUDA 12.1 runtime, from the pytorch/nvidia channels
+  - nvidia::cuda-toolkit=12.1  # nvcc + headers for compiling models/ops
+  # --- scientific / base-repo deps ---
+  - numpy<2                  # <2 avoids ABI clashes with the compiled op & pycocotools
+  - scipy                    # base matcher (models/matcher.py) uses linear_sum_assignment
+  - cython
+  - pip:
+      - pycocotools          # COCO loading + evaluation
+      - tqdm
