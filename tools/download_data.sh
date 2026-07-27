@@ -2,6 +2,10 @@
 # ------------------------------------------------------------------------
 # Tree-DETR : download COCO 2017 + a pretrained Deformable-DETR checkpoint
 # ------------------------------------------------------------------------
+# 阿里云镜像 (default): COCO 2017 is pulled from the ModelScope dataset
+# PAI/COCO2017, which is backed by Alibaba Cloud OSS (fast in China, no proxy).
+# Pass --mirror official to use the canonical cocodataset.org servers instead.
+# ------------------------------------------------------------------------
 # Lays COCO out exactly as datasets/coco.py expects:
 #
 #   <root>/
@@ -23,6 +27,13 @@
 #   bash tools/download_data.sh --ckpt refine        # a different checkpoint
 #   bash tools/download_data.sh --skip-ckpt          # dataset only
 #   bash tools/download_data.sh --skip-coco          # checkpoint only
+#   bash tools/download_data.sh --mirror official    # use cocodataset.org
+#
+# Mirror overrides (env vars):
+#   COCO_MIRROR_BASE=<url-prefix>   point COCO downloads at your own aliyun OSS
+#                                   bucket; each file is fetched as <prefix><name>
+#   CKPT_MIRROR_BASE=<url-prefix>   fetch the .pth from <prefix>/<file> (e.g. an
+#                                   aliyun OSS mirror) instead of Google Drive.
 # ------------------------------------------------------------------------
 set -euo pipefail
 
@@ -33,6 +44,18 @@ CKPT="main"                 # which pretrained model (see CKPT_IDS below)
 WANT_FULL=0                 # 1 => also download train2017 (18 GB)
 SKIP_COCO=0
 SKIP_CKPT=0
+MIRROR="modelscope"         # modelscope (阿里云 OSS) | official (cocodataset.org)
+
+# ---- 阿里云 / ModelScope mirror config ---------------------------------
+# COCO 2017 files come from the ModelScope dataset PAI/COCO2017 (Alibaba Cloud
+# OSS-backed). The repo file endpoint 302-redirects to OSS and is resumable via
+# wget/curl. Override COCO_MIRROR_BASE to use your own aliyun OSS bucket.
+COCO_MIRROR_BASE="${COCO_MIRROR_BASE:-https://modelscope.cn/api/v1/datasets/PAI/COCO2017/repo?Revision=master&FilePath=}"
+# Optional checkpoint mirror. If set, the .pth is fetched from
+# ${CKPT_MIRROR_BASE}/r50_deformable_detr_<ckpt>.pth (e.g. an aliyun OSS bucket).
+# Left empty by default because the original checkpoints are only published on
+# Google Drive; in that case we fall back to gdown.
+CKPT_MIRROR_BASE="${CKPT_MIRROR_BASE:-}"
 
 # Deformable-DETR model zoo (Google Drive file ids, from README.md) -------
 declare -A CKPT_IDS=(
@@ -51,10 +74,11 @@ while [[ $# -gt 0 ]]; do
     --ckpt)      CKPT="$2"; shift 2 ;;
     --full)      WANT_FULL=1; shift ;;
     --val-only)  WANT_FULL=0; shift ;;
+    --mirror)    MIRROR="$2"; shift 2 ;;
     --skip-coco) SKIP_COCO=1; shift ;;
     --skip-ckpt) SKIP_CKPT=1; shift ;;
     -h|--help)
-      sed -n '2,34p' "$0"; exit 0 ;;
+      sed -n '2,37p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -94,17 +118,30 @@ if [[ "$SKIP_COCO" -eq 0 ]]; then
   mkdir -p "$ROOT"
   TMP="$ROOT/_zips"; mkdir -p "$TMP"
 
+  # Resolve download URLs per selected mirror -----------------------------
+  if [[ "$MIRROR" == "official" ]]; then
+    echo "  [mirror] cocodataset.org (official)"
+    VAL_URL="http://images.cocodataset.org/zips/val2017.zip"
+    ANN_URL="http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+    TRAIN_URL="http://images.cocodataset.org/zips/train2017.zip"
+  else
+    echo "  [mirror] 阿里云 / ModelScope: ${COCO_MIRROR_BASE}"
+    VAL_URL="${COCO_MIRROR_BASE}val2017.zip"
+    ANN_URL="${COCO_MIRROR_BASE}annotations_trainval2017.zip"
+    TRAIN_URL="${COCO_MIRROR_BASE}train2017.zip"
+  fi
+
   echo "-- val2017 images (~1 GB) --"
-  fetch "http://images.cocodataset.org/zips/val2017.zip" "$TMP/val2017.zip"
+  fetch "$VAL_URL" "$TMP/val2017.zip"
   unzip_to "$TMP/val2017.zip" "$ROOT" "$ROOT/val2017"
 
   echo "-- annotations (~250 MB) --"
-  fetch "http://images.cocodataset.org/annotations/annotations_trainval2017.zip" "$TMP/ann.zip"
+  fetch "$ANN_URL" "$TMP/ann.zip"
   unzip_to "$TMP/ann.zip" "$ROOT" "$ROOT/annotations/instances_val2017.json"
 
   if [[ "$WANT_FULL" -eq 1 ]]; then
     echo "-- train2017 images (~18 GB) --"
-    fetch "http://images.cocodataset.org/zips/train2017.zip" "$TMP/train2017.zip"
+    fetch "$TRAIN_URL" "$TMP/train2017.zip"
     unzip_to "$TMP/train2017.zip" "$ROOT" "$ROOT/train2017"
   else
     echo "  [note] train2017 skipped (use --full to fetch it, ~18 GB)."
@@ -131,7 +168,14 @@ if [[ "$SKIP_CKPT" -eq 0 ]]; then
 
   if [[ -f "$OUT" ]]; then
     echo "  [skip] $OUT already present"
+  elif [[ -n "$CKPT_MIRROR_BASE" ]]; then
+    # aliyun OSS / ModelScope mirror: fetch <base>/r50_deformable_detr_<ckpt>.pth
+    echo "  [mirror] ${CKPT_MIRROR_BASE%/}"
+    fetch "${CKPT_MIRROR_BASE%/}/r50_deformable_detr_${CKPT}.pth" "$OUT"
   else
+    # No public aliyun mirror of the original checkpoints exists; fall back to
+    # Google Drive. Set CKPT_MIRROR_BASE to use an aliyun OSS bucket instead.
+    echo "  [note] no CKPT_MIRROR_BASE set -> using Google Drive (may need a proxy in CN)"
     if ! have gdown; then
       echo "  installing gdown (Google Drive downloader)..."
       pip install -q gdown
