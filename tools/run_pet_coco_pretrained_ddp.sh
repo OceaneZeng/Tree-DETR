@@ -17,6 +17,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"       # per GPU; total batch is 2 with two GPUs
 NUM_WORKERS="${NUM_WORKERS:-2}"     # per process
 MASTER_PORT="${MASTER_PORT:-29501}"
 NO_RANDOM_CROP="${NO_RANDOM_CROP:-0}"
+NO_AUGMENTATION="${NO_AUGMENTATION:-0}"
 INIT_PET_CLASSIFIER_FROM_COCO="${INIT_PET_CLASSIFIER_FROM_COCO:-0}"
 
 # Keep CUDA ordinals aligned with nvidia-smi on mixed 3090/4090/5090 hosts.
@@ -39,6 +40,12 @@ if [[ ! -f "${COCO_PATH}/annotations/instances_train2017.json" || ! -f "${COCO_P
     echo "Run tools/download_experiment_assets.sh first." >&2
     exit 1
 fi
+METADATA_PATH="${METADATA_PATH:-${COCO_PATH}/split_metadata.json}"
+if [[ ! -f "${METADATA_PATH}" ]]; then
+    echo "ERROR: split metadata not found: ${METADATA_PATH}" >&2
+    echo "Set METADATA_PATH when using a derived diagnostic dataset." >&2
+    exit 1
+fi
 if [[ -e "${OUTPUT_DIR}/training_complete.json" ]]; then
     echo "ERROR: output already contains a completed run: ${OUTPUT_DIR}" >&2
     echo "Choose another OUTPUT_DIR to avoid mixing logs." >&2
@@ -59,12 +66,15 @@ if ! "${PYTHON_BIN}" -c 'import torch, pycocotools' >/dev/null 2>&1; then
     exit 1
 fi
 
-NUM_CLASSES="$("${PYTHON_BIN}" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["num_known"])' "${DATA_ROOT}/${DATASET_NAME}/split_metadata.json")"
+NUM_CLASSES="$("${PYTHON_BIN}" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["num_known"])' "${METADATA_PATH}")"
 mkdir -p "${OUTPUT_DIR}"
 export PYTHONPATH="${PROJECT_ROOT}/models/ops${PYTHONPATH:+:${PYTHONPATH}}"
 EXTRA_ARGS=()
 if [[ "${NO_RANDOM_CROP}" == "1" ]]; then
     EXTRA_ARGS+=(--no-random-crop)
+fi
+if [[ "${NO_AUGMENTATION}" == "1" ]]; then
+    EXTRA_ARGS+=(--no-augmentation)
 fi
 if [[ "${INIT_PET_CLASSIFIER_FROM_COCO}" == "1" ]]; then
     EXTRA_ARGS+=(--init-pet-classifier-from-coco)
