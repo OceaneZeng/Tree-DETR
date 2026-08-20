@@ -14,6 +14,11 @@ VAL_PER_CLASS="${VAL_PER_CLASS:-30}"
 UNKNOWN_PER_SPECIES="${UNKNOWN_PER_SPECIES:-4}"
 INCREMENT_PER_CLASS="${INCREMENT_PER_CLASS:-100}"
 CHECKPOINT="${CHECKPOINT:-main}"
+OXFORD_MIRROR_BASE="${OXFORD_MIRROR_BASE:-https://thor.robots.ox.ac.uk/pets}"
+OXFORD_IMAGES_URL="${OXFORD_IMAGES_URL:-${OXFORD_MIRROR_BASE%/}/images.tar.gz}"
+OXFORD_ANNOTATIONS_URL="${OXFORD_ANNOTATIONS_URL:-${OXFORD_MIRROR_BASE%/}/annotations.tar.gz}"
+CKPT_MIRROR_URL="${CKPT_MIRROR_URL:-}"
+CKPT_MIRROR_BASE="${CKPT_MIRROR_BASE:-}"
 
 usage() {
     echo "Usage: bash tools/download_experiment_assets.sh [options]"
@@ -22,6 +27,8 @@ usage() {
     echo "  --dataset-name NAME       generated COCO split name"
     echo "  --checkpoint NAME         main, single_scale, single_scale_dc5, refine, two_stage"
     echo "  --seed N                  split seed"
+    echo "Mirror variables: OXFORD_MIRROR_BASE, OXFORD_IMAGES_URL, OXFORD_ANNOTATIONS_URL"
+    echo "                 CKPT_MIRROR_URL or CKPT_MIRROR_BASE"
     echo "All defaults can also be overridden with environment variables."
 }
 
@@ -67,8 +74,35 @@ if [[ -s "${CHECKPOINT_PATH}" ]]; then
 else
     PARTIAL="${CHECKPOINT_PATH}.part"
     rm -f "${PARTIAL}"
-    echo "Downloading Deformable-DETR ${CHECKPOINT} checkpoint"
-    gdown "https://drive.google.com/uc?id=${CKPT_ID}" -O "${PARTIAL}"
+    if [[ -n "${CKPT_MIRROR_URL}" ]]; then
+        echo "Downloading checkpoint from mirror: ${CKPT_MIRROR_URL}"
+        if command -v aria2c >/dev/null 2>&1; then
+            aria2c --allow-overwrite=true --continue=true --out="$(basename "${PARTIAL}")" --dir="$(dirname "${PARTIAL}")" "${CKPT_MIRROR_URL}"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L --fail --retry 3 --retry-delay 2 -C - -o "${PARTIAL}" "${CKPT_MIRROR_URL}"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -c -O "${PARTIAL}" "${CKPT_MIRROR_URL}"
+        else
+            echo "ERROR: mirror download needs aria2c, curl, or wget." >&2
+            exit 1
+        fi
+    elif [[ -n "${CKPT_MIRROR_BASE}" ]]; then
+        CKPT_URL="${CKPT_MIRROR_BASE%/}/r50_deformable_detr_${CHECKPOINT}.pth"
+        echo "Downloading checkpoint from mirror: ${CKPT_URL}"
+        if command -v aria2c >/dev/null 2>&1; then
+            aria2c --allow-overwrite=true --continue=true --out="$(basename "${PARTIAL}")" --dir="$(dirname "${PARTIAL}")" "${CKPT_URL}"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L --fail --retry 3 --retry-delay 2 -C - -o "${PARTIAL}" "${CKPT_URL}"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -c -O "${PARTIAL}" "${CKPT_URL}"
+        else
+            echo "ERROR: mirror download needs aria2c, curl, or wget." >&2
+            exit 1
+        fi
+    else
+        echo "No checkpoint mirror configured; using Google Drive"
+        gdown "https://drive.google.com/uc?id=${CKPT_ID}" -O "${PARTIAL}"
+    fi
     if [[ ! -s "${PARTIAL}" ]]; then
         echo "ERROR: checkpoint download produced an empty file." >&2
         exit 1
@@ -77,6 +111,8 @@ else
 fi
 
 echo "Preparing Oxford-IIIT Pet split under ${DATA_ROOT}"
+echo "  images source:      ${OXFORD_IMAGES_URL}"
+echo "  annotations source: ${OXFORD_ANNOTATIONS_URL}"
 "${PYTHON_BIN}" "${PROJECT_ROOT}/tools/data/prepare_oxford_pet.py" \
     --root "${DATA_ROOT}" \
     --seed "${SEED}" \
@@ -87,6 +123,8 @@ echo "Preparing Oxford-IIIT Pet split under ${DATA_ROOT}"
     --unknown-val-per-class "${VAL_PER_CLASS}" \
     --increment-per-class "${INCREMENT_PER_CLASS}" \
     --increment-unknown-index 0 \
+    --images-url "${OXFORD_IMAGES_URL}" \
+    --annotations-url "${OXFORD_ANNOTATIONS_URL}" \
     --dataset-name "${DATASET_NAME}"
 
 echo

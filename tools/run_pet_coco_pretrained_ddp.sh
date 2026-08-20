@@ -17,6 +17,15 @@ BATCH_SIZE="${BATCH_SIZE:-1}"       # per GPU; total batch is 2 with two GPUs
 NUM_WORKERS="${NUM_WORKERS:-2}"     # per process
 MASTER_PORT="${MASTER_PORT:-29501}"
 
+# Keep CUDA ordinals aligned with nvidia-smi on mixed 3090/4090/5090 hosts.
+# Without this, CUDA's FASTEST_FIRST order can expose the 5090 as ordinal 0.
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
+export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
+
+if [[ ! -f "${CHECKPOINT}" && "${CHECKPOINT}" == "${PROJECT_ROOT}/pretrained/r50_deformable_detr.pth" && -f "${PROJECT_ROOT}/pretrained/r50_deformable_detr-checkpoint.pth" ]]; then
+    CHECKPOINT="${PROJECT_ROOT}/pretrained/r50_deformable_detr-checkpoint.pth"
+    echo "Using legacy checkpoint filename: ${CHECKPOINT}"
+fi
 if [[ ! -f "${CHECKPOINT}" ]]; then
     echo "ERROR: checkpoint not found: ${CHECKPOINT}" >&2
     echo "Run tools/download_experiment_assets.sh first." >&2
@@ -45,11 +54,11 @@ fi
 
 NUM_CLASSES="$("${PYTHON_BIN}" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["num_known"])' "${DATA_ROOT}/${DATASET_NAME}/split_metadata.json")"
 mkdir -p "${OUTPUT_DIR}"
-export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
 export PYTHONPATH="${PROJECT_ROOT}/models/ops${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "Starting DDP baseline"
 echo "  GPUs: ${GPU_LIST} (processes=${NPROC_PER_NODE}, batch_per_gpu=${BATCH_SIZE})"
+echo "  CUDA_DEVICE_ORDER: ${CUDA_DEVICE_ORDER}"
 echo "  data: ${COCO_PATH}"
 echo "  output: ${OUTPUT_DIR}"
 

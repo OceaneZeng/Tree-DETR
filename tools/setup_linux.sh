@@ -19,7 +19,14 @@ fi
 eval "$(conda shell.bash hook)"
 if conda env list | awk '{print $1}' | grep -Fxq "${ENV_NAME}"; then
     echo "Updating conda environment: ${ENV_NAME}"
-    conda env update --name "${ENV_NAME}" --file "${ENV_FILE}"
+    # Older copies of this environment may contain torchaudio 2.1.x. It pins
+    # PyTorch 2.1.x and makes the requested PyTorch 2.4.1 solve impossible;
+    # Tree-DETR does not use torchaudio.
+    if conda list --name "${ENV_NAME}" | awk 'NR > 3 && $1 == "torchaudio" { found=1 } END { exit !found }'; then
+        echo "Removing stale incompatible package: torchaudio"
+        conda remove --name "${ENV_NAME}" --yes torchaudio
+    fi
+    conda env update --name "${ENV_NAME}" --file "${ENV_FILE}" --prune
 else
     echo "Creating conda environment: ${ENV_NAME}"
     conda env create --name "${ENV_NAME}" --file "${ENV_FILE}"
