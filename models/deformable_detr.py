@@ -442,8 +442,10 @@ class MLP(nn.Module):
 
 
 def build(args):
-    num_classes = 20 if args.dataset_file != 'coco' else 91
-    if args.dataset_file == "coco_panoptic":
+    requested_num_classes = getattr(args, 'num_classes', None)
+    num_classes = requested_num_classes if requested_num_classes is not None \
+        else (20 if args.dataset_file != 'coco' else 91)
+    if args.dataset_file == "coco_panoptic" and requested_num_classes is None:
         num_classes = 250
     device = torch.device(args.device)
 

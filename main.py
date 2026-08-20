@@ -24,6 +24,7 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+from util.checkpoint import matching_state_dict
 
 
 def get_args_parser():
@@ -47,6 +48,8 @@ def get_args_parser():
     # Variants of Deformable DETR
     parser.add_argument('--with_box_refine', default=False, action='store_true')
     parser.add_argument('--two_stage', default=False, action='store_true')
+    parser.add_argument('--with_tree', action='store_true',
+                        help='Enable the experimental Tree-DETR EE-0 flat-tree losses and adapters')
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -55,6 +58,8 @@ def get_args_parser():
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
+    parser.add_argument('--num_classes', default=None, type=int,
+                        help='Override the class count for a remapped lightweight dataset')
     parser.add_argument('--dilation', action='store_true',
                         help="If true, we replace stride with dilation in the last convolutional block (DC5)")
     parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
@@ -104,6 +109,8 @@ def get_args_parser():
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
+    parser.add_argument('--class_embed_lr_mult', default=1.0, type=float,
+                        help='learning-rate multiplier for a newly initialized classifier')
 
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
@@ -117,11 +124,19 @@ def get_args_parser():
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--pretrained', default='',
+                        help='load model weights only and start a fresh optimizer/schedule')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval_interval', default=1, type=int,
+                        help='evaluate every N epochs; the final epoch is always evaluated')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
+    parser.add_argument('--lightweight', action='store_true',
+                        help='Use 256-384 px image scales for feasibility experiments')
+    parser.add_argument('--no-augmentation', action='store_true',
+                        help='Use the validation resize for training; only for overfit diagnostics')
 
     return parser
 
@@ -142,8 +157,19 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
+    # Keep the original detector path as the default.  The opt-in tree path is
+    # currently the EE-0 flat-tree control, not an automatically induced tree.
+    epoch_state = {'value': args.start_epoch}
+    tree_head = None
+    if args.with_tree:
+        from models.tree import build_tree
+        model, criterion, postprocessors, tree_head = build_tree(
+            args, epoch_getter=lambda: epoch_state['value'])
+        print('Tree-DETR enabled: EE-0 flat two-level tree with reserved-gap losses.')
+    else:
+        model, criterion, postprocessors = build_model(args)
     model.to(device)
+    criterion.to(device)
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -185,11 +211,14 @@ def main(args):
     for n, p in model_without_ddp.named_parameters():
         print(n)
 
+    class_head_names = ['class_embed']
     param_dicts = [
         {
             "params":
                 [p for n, p in model_without_ddp.named_parameters()
-                 if not match_name_keywords(n, args.lr_backbone_names) and not match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                 if not match_name_keywords(n, args.lr_backbone_names)
+                 and not match_name_keywords(n, args.lr_linear_proj_names)
+                 and not match_name_keywords(n, class_head_names) and p.requires_grad],
             "lr": args.lr,
         },
         {
@@ -199,6 +228,11 @@ def main(args):
         {
             "params": [p for n, p in model_without_ddp.named_parameters() if match_name_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
             "lr": args.lr * args.lr_linear_proj_mult,
+        },
+        {
+            "params": [p for n, p in model_without_ddp.named_parameters()
+                       if match_name_keywords(n, class_head_names) and p.requires_grad],
+            "lr": args.lr * args.class_embed_lr_mult,
         }
     ]
     if args.sgd:
@@ -221,16 +255,29 @@ def main(args):
         base_ds = get_coco_api_from_dataset(dataset_val)
 
     if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+        with torch.serialization.safe_globals([argparse.Namespace]):
+            checkpoint = torch.load(args.frozen_weights, map_location='cpu', weights_only=True)
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+    if args.pretrained:
+        with torch.serialization.safe_globals([argparse.Namespace]):
+            checkpoint = torch.load(args.pretrained, map_location='cpu', weights_only=True)
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
+        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
+        print(f'Loaded {len(compatible)} shape-compatible pretrained tensors only; skipped={skipped}.')
+        if missing_keys:
+            print('Missing Keys: {}'.format(missing_keys))
+        if unexpected_keys:
+            print('Unexpected Keys: {}'.format(unexpected_keys))
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            with torch.serialization.safe_globals([argparse.Namespace]):
+                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
@@ -270,6 +317,7 @@ def main(args):
     print("Start training")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
+        epoch_state['value'] = epoch
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
@@ -289,9 +337,14 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
+        should_evaluate = ((epoch + 1) % max(1, args.eval_interval) == 0
+                           or epoch + 1 == args.epochs)
+        if should_evaluate:
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            )
+        else:
+            test_stats, coco_evaluator = {}, None
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
@@ -316,6 +369,10 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    if args.output_dir and utils.is_main_process():
+        with (output_dir / 'training_complete.json').open('w') as f:
+            json.dump({'epochs': args.epochs, 'last_epoch': args.epochs - 1,
+                       'training_time_seconds': int(total_time)}, f)
 
 
 if __name__ == '__main__':

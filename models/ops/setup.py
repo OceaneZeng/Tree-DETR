@@ -48,11 +48,21 @@ def get_extensions():
 
     sources = [os.path.join(extensions_dir, s) for s in sources]
     include_dirs = [extensions_dir]
+    library_dirs = []
+    # NVIDIA's Windows Conda packages place CCCL headers under this target
+    # directory, while a system CUDA installation keeps them in include/nv.
+    cuda_target_include = os.path.join(CUDA_HOME, "include", "targets", "x64")
+    if os.path.isdir(cuda_target_include):
+        include_dirs.append(cuda_target_include)
+    cuda_conda_lib = os.path.join(CUDA_HOME, "lib")
+    if os.path.isdir(cuda_conda_lib):
+        library_dirs.append(cuda_conda_lib)
     ext_modules = [
         extension(
             "MultiScaleDeformableAttention",
             sources,
             include_dirs=include_dirs,
+            library_dirs=library_dirs,
             define_macros=define_macros,
             extra_compile_args=extra_compile_args,
         )

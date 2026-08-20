@@ -271,6 +271,7 @@ def extract_features(args) -> Stage0Features:
     device, plus the standard Deformable-DETR build args; ``unknown_class_ids``
     (a list) marks which COCO categories are treated as unknown.
     """
+    import argparse
     import torch                                            # noqa: F401
     from models import build_model                          # lazy: pulls in ops
     from datasets import build_dataset
@@ -280,7 +281,8 @@ def extract_features(args) -> Stage0Features:
     device = torch.device(getattr(args, "device", "cpu"))
     model, _criterion, _pp = build_model(args)
     model.to(device).eval()
-    ckpt = torch.load(args.resume, map_location="cpu")
+    with torch.serialization.safe_globals([argparse.Namespace]):
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
     model.load_state_dict(ckpt["model"], strict=False)
 
     # capture last-decoder-layer hs via a forward hook on the transformer
@@ -290,23 +292,51 @@ def extract_features(args) -> Stage0Features:
         cache["hs"] = o[0]                                  # [n_layers, bs, nq, d]
     model.transformer.register_forward_hook(hook)
 
-    dataset = build_dataset(image_set="val", args=args)
+    stage0_ann = getattr(args, "stage0_ann", None)
+    if stage0_ann:
+        from pathlib import Path
+        from datasets.coco import CocoDetection, make_coco_transforms
+        dataset = CocoDetection(
+            Path(args.coco_path) / "val2017", stage0_ann,
+            transforms=make_coco_transforms("val", getattr(args, "lightweight", False)),
+            return_masks=False, cache_mode=False, local_rank=0, local_size=1)
+    else:
+        dataset = build_dataset(image_set="val", args=args)
     loader = DataLoader(dataset, batch_size=1, shuffle=False,
                         collate_fn=utils.collate_fn, num_workers=0)
 
-    from models.matcher import build_matcher
-    matcher = build_matcher(args)
     unknown_ids = set(getattr(args, "unknown_class_ids", []) or [])
+    rng = np.random.RandomState(getattr(args, "seed", 0))
+    max_images = getattr(args, "max_images", None)
+
+    # Unknown labels are outside the closed-set head, so classification-cost
+    # Hungarian matching would either leak labels or index past the logits.
+    # Match all Stage-0 ground truth class-agnostically using box geometry.
+    from scipy.optimize import linear_sum_assignment
+    from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+
+    def box_match(pred_boxes, target_boxes):
+        if target_boxes.numel() == 0:
+            empty = torch.empty(0, dtype=torch.int64)
+            return empty, empty
+        cost_bbox = torch.cdist(pred_boxes, target_boxes, p=1)
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(pred_boxes),
+                                         box_cxcywh_to_xyxy(target_boxes))
+        src, tgt = linear_sum_assignment((5.0 * cost_bbox + 2.0 * cost_giou).cpu())
+        return torch.as_tensor(src, dtype=torch.int64), torch.as_tensor(tgt, dtype=torch.int64)
 
     H, NRM, LAB, KND, POST, AR = [], [], [], [], [], []
     with torch.no_grad():
-        for samples, targets in loader:
+        for image_index, (samples, targets) in enumerate(loader):
+            if max_images is not None and image_index >= max_images:
+                break
             samples = samples.to(device)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             out = model(samples)
             hs = cache["hs"][-1]                            # (bs, nq, d)
-            indices = matcher(out, targets)
-            post = out["pred_logits"].softmax(-1)           # (bs, nq, K(+1))
+            indices = [box_match(out["pred_boxes"][b], targets[b]["boxes"])
+                       for b in range(len(targets))]
+            post = out["pred_logits"].sigmoid()             # focal-class scores
             for b, (src, tgt) in enumerate(indices):
                 matched = set(src.tolist())
                 for qi in range(hs.shape[1]):
@@ -316,20 +346,31 @@ def extract_features(args) -> Stage0Features:
                         ti = tgt[(src == qi).nonzero().item()].item()
                         cls = int(targets[b]["labels"][ti].item())
                         box = targets[b]["boxes"][ti].cpu().numpy()
-                        ar = float(box[2] * box[3])          # cxcywh (normalised)
+                        orig_h, orig_w = targets[b]["orig_size"].tolist()
+                        ar = float(box[2] * orig_w * box[3] * orig_h)
                         kind = UNKNOWN if cls in unknown_ids else KNOWN
                         H.append(h); NRM.append(float(np.linalg.norm(h)))
                         LAB.append(cls); KND.append(kind); POST.append(p); AR.append(ar)
-                    elif np.random.rand() < 0.02:            # sample a few backgrounds
+                    elif rng.rand() < 0.02:                  # sample a few backgrounds
                         H.append(h); NRM.append(float(np.linalg.norm(h)))
                         LAB.append(-1); KND.append(BACKGROUND); POST.append(p); AR.append(0.0)
 
-    K = int(model.num_classes) if hasattr(model, "num_classes") else POST[0].shape[0]
+    K = POST[0].shape[0]
+    class_super = None
+    metadata_path = getattr(args, "split_metadata", None)
+    if metadata_path:
+        import json
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        if metadata.get("known_class_super") is not None:
+            class_super = np.asarray(metadata["known_class_super"], np.int64)
     return Stage0Features(
         h=np.asarray(H, np.float32), norms=np.asarray(NRM, np.float32),
         labels=np.asarray(LAB, np.int64), kind=np.asarray(KND, np.int64),
         posteriors=np.asarray(POST, np.float32)[:, :K], areas=np.asarray(AR, np.float32),
-        num_known=K, unknown_classes=np.asarray(sorted(unknown_ids), np.int64),
+        num_known=K, class_super=class_super,
+        unknown_classes=np.asarray(sorted(unknown_ids), np.int64),
+        meta={"checkpoint": str(args.resume), "images": image_index + 1},
     )
 
 

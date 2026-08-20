@@ -105,6 +105,9 @@ class TreeCriterion(nn.Module):
         self.cfg = cfg
         self.obj_loss_coef = obj_loss_coef
         self.matcher = base_criterion.matcher
+        # engine.py reads criterion.weight_dict directly.  Keep the wrapper
+        # on the exact same dictionary that the base criterion uses.
+        self.weight_dict = base_criterion.weight_dict
         self.epoch_getter = epoch_getter        # callable -> current epoch (for warmup)
 
     def forward(self, outputs: Dict, targets: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -158,7 +161,7 @@ def attach_tree_head(model: nn.Module, tree: ConfusabilityTree,
 
 
 def build_tree(args, tree: Optional[ConfusabilityTree] = None,
-               cfg: Optional[TreeConfig] = None):
+               cfg: Optional[TreeConfig] = None, epoch_getter=None):
     """Factory: build the vanilla Deformable-DETR, then attach the tree head.
 
     Returns (model, tree_criterion, postprocessors, tree_head).  If ``tree`` is
@@ -175,7 +178,7 @@ def build_tree(args, tree: Optional[ConfusabilityTree] = None,
         tree = flat_two_level_tree(num_classes)
 
     head = attach_tree_head(model, tree, cfg)
-    criterion = TreeCriterion(base_criterion, head, cfg)
+    criterion = TreeCriterion(base_criterion, head, cfg, epoch_getter=epoch_getter)
 
     # fold tree-loss weights into the criterion's weight_dict so the training
     # loop scales them like any other DETR loss.

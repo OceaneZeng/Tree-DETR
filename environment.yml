@@ -38,3 +38,4 @@ dependencies:
   - pip:
       - pycocotools          # COCO loading + evaluation
       - tqdm
+      - gdown                # Google Drive checkpoint download

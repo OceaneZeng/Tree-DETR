@@ -1,0 +1,124 @@
+"""Class-scoped exemplar selection and COCO annotation assembly."""
+
+from __future__ import annotations
+
+import json
+import random
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Sequence
+
+
+def _load_coco(source) -> Dict:
+    if isinstance(source, Mapping):
+        return dict(source)
+    with Path(source).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def class_image_index(coco: Mapping) -> Dict[int, List[int]]:
+    index = defaultdict(set)
+    for annotation in coco.get("annotations", []):
+        index[int(annotation["category_id"])].add(int(annotation["image_id"]))
+    return {class_id: sorted(image_ids) for class_id, image_ids in index.items()}
+
+
+def select_replay_images(coco: Mapping, class_ids: Iterable[int], budget: int,
+                         seed: int = 42) -> List[int]:
+    """Round-robin class-balanced selection with a hard image budget."""
+    if budget <= 0:
+        return []
+    rng = random.Random(seed)
+    by_class = class_image_index(coco)
+    classes = sorted({int(class_id) for class_id in class_ids})
+    candidates = {}
+    for class_id in classes:
+        values = list(by_class.get(class_id, []))
+        rng.shuffle(values)
+        candidates[class_id] = values
+    selected = []
+    selected_set = set()
+    while len(selected) < budget:
+        made_progress = False
+        for class_id in classes:
+            while candidates[class_id] and candidates[class_id][0] in selected_set:
+                candidates[class_id].pop(0)
+            if not candidates[class_id]:
+                continue
+            image_id = candidates[class_id].pop(0)
+            selected.append(image_id)
+            selected_set.add(image_id)
+            made_progress = True
+            if len(selected) == budget:
+                break
+        if not made_progress:
+            break
+    return selected
+
+
+def build_increment_annotation(new_annotations, base_annotations,
+                               replay_classes: Sequence[int], replay_budget: int,
+                               output_path, seed: int = 42) -> Dict[str, object]:
+    """Combine fully labeled new-class images with selected old exemplars."""
+    new_coco = _load_coco(new_annotations)
+    base_coco = _load_coco(base_annotations)
+    replay_ids = set(select_replay_images(
+        base_coco, replay_classes, replay_budget, seed=seed,
+    ))
+    replay_images = [image for image in base_coco.get("images", [])
+                     if int(image["id"]) in replay_ids]
+    replay_annotations = [annotation for annotation in base_coco.get("annotations", [])
+                          if int(annotation["image_id"]) in replay_ids]
+
+    images = [dict(image) for image in new_coco.get("images", [])]
+    used_image_ids = {int(image["id"]): image.get("file_name") for image in images}
+    next_image_id = max(used_image_ids, default=0) + 1
+    replay_id_map = {}
+    for image in replay_images:
+        old_id = int(image["id"])
+        new_id = old_id
+        if old_id in used_image_ids and used_image_ids[old_id] != image.get("file_name"):
+            new_id = next_image_id
+            next_image_id += 1
+        replay_id_map[old_id] = new_id
+        copied = dict(image)
+        copied["id"] = new_id
+        if new_id not in used_image_ids:
+            images.append(copied)
+            used_image_ids[new_id] = copied.get("file_name")
+
+    annotations = []
+    for annotation in new_coco.get("annotations", []):
+        copied = dict(annotation)
+        copied["id"] = len(annotations) + 1
+        annotations.append(copied)
+    for annotation in replay_annotations:
+        copied = dict(annotation)
+        copied["id"] = len(annotations) + 1
+        copied["image_id"] = replay_id_map[int(annotation["image_id"])]
+        annotations.append(copied)
+
+    combined = {
+        "info": {
+            "description": "Graph-local continual adaptation increment",
+            "new_images": len(new_coco.get("images", [])),
+            "replay_images": len(replay_images),
+            "replay_classes": [int(class_id) for class_id in replay_classes],
+            "seed": int(seed),
+        },
+        "licenses": new_coco.get("licenses", base_coco.get("licenses", [])),
+        "images": images,
+        "annotations": annotations,
+        "categories": new_coco.get("categories", base_coco.get("categories", [])),
+    }
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as handle:
+        json.dump(combined, handle, ensure_ascii=True)
+    return {
+        "output": str(destination),
+        "new_images": len(new_coco.get("images", [])),
+        "replay_images": len(replay_images),
+        "total_images": len(images),
+        "replay_classes": [int(class_id) for class_id in replay_classes],
+    }
