@@ -148,6 +148,8 @@ def get_args_parser():
                         help='Use 256-384 px image scales for feasibility experiments')
     parser.add_argument('--no-augmentation', action='store_true',
                         help='Use the validation resize for training; only for overfit diagnostics')
+    parser.add_argument('--no-random-crop', action='store_true',
+                        help='Keep flips and multi-scale resize but disable the COCO random-crop branch')
 
     return parser
 

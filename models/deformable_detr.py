@@ -251,8 +251,10 @@ class SetCriterion(nn.Module):
         pred_logits = outputs['pred_logits']
         device = pred_logits.device
         tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
-        # Count the number of predictions that are NOT "no-object" (which is the last class)
-        card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
+        # Focal-loss Deformable DETR has no explicit no-object logit. The old
+        # argmax-based calculation treated the final foreground class as
+        # background and made this diagnostic almost equal to num_queries.
+        card_pred = (pred_logits.sigmoid().max(-1).values > 0.5).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'cardinality_error': card_err}
         return losses

@@ -122,7 +122,8 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 
-def make_coco_transforms(image_set, lightweight=False, no_augmentation=False):
+def make_coco_transforms(image_set, lightweight=False, no_augmentation=False,
+                         no_random_crop=False):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -143,6 +144,12 @@ def make_coco_transforms(image_set, lightweight=False, no_augmentation=False):
                 normalize,
             ])
         if lightweight:
+            return T.Compose([
+                T.RandomHorizontalFlip(),
+                T.RandomResize(scales, max_size=max_size),
+                normalize,
+            ])
+        if no_random_crop:
             return T.Compose([
                 T.RandomHorizontalFlip(),
                 T.RandomResize(scales, max_size=max_size),
@@ -183,7 +190,8 @@ def build(image_set, args):
     dataset = CocoDetection(img_folder, ann_file,
                             transforms=make_coco_transforms(
                                 image_set, getattr(args, 'lightweight', False),
-                                getattr(args, 'no_augmentation', False)),
+                                getattr(args, 'no_augmentation', False),
+                                getattr(args, 'no_random_crop', False)),
                             return_masks=args.masks,
                             cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
     return dataset
