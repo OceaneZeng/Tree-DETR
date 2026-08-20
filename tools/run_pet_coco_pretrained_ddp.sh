@@ -47,8 +47,13 @@ if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -print -quit)
     echo "Choose another OUTPUT_DIR, or set ALLOW_EXISTING_OUTPUT=1 deliberately." >&2
     exit 1
 fi
-if ! command -v torchrun >/dev/null 2>&1; then
-    echo "ERROR: torchrun was not found. Activate the tree-detr environment." >&2
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    echo "ERROR: Python executable was not found: ${PYTHON_BIN}" >&2
+    exit 1
+fi
+if ! "${PYTHON_BIN}" -c 'import torch, pycocotools' >/dev/null 2>&1; then
+    echo "ERROR: ${PYTHON_BIN} cannot import torch and pycocotools." >&2
+    echo "Activate tree-detr or set PYTHON_BIN to its Python executable." >&2
     exit 1
 fi
 
@@ -63,7 +68,8 @@ echo "  data: ${COCO_PATH}"
 echo "  output: ${OUTPUT_DIR}"
 
 cd "${PROJECT_ROOT}"
-torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" --master_port="${MASTER_PORT}" \
+"${PYTHON_BIN}" -m torch.distributed.run --standalone \
+    --nproc_per_node="${NPROC_PER_NODE}" --master_port="${MASTER_PORT}" \
     main.py \
     --coco_path "${COCO_PATH}" \
     --output_dir "${OUTPUT_DIR}" \

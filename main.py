@@ -27,6 +27,17 @@ from models import build_model
 from util.checkpoint import matching_state_dict
 
 
+def load_local_checkpoint(path):
+    """Load a trusted local checkpoint across PyTorch 2.4+ releases."""
+    safe_globals = getattr(torch.serialization, 'safe_globals', None)
+    if safe_globals is None:
+        # PyTorch 2.4 lacks safe_globals. These are local experiment or
+        # official model-zoo checkpoints, whose provenance is controlled here.
+        return torch.load(path, map_location='cpu', weights_only=False)
+    with safe_globals([argparse.Namespace]):
+        return torch.load(path, map_location='cpu', weights_only=True)
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
     parser.add_argument('--lr', default=2e-4, type=float)
@@ -208,9 +219,6 @@ def main(args):
                 break
         return out
 
-    for n, p in model_without_ddp.named_parameters():
-        print(n)
-
     class_head_names = ['class_embed']
     param_dicts = [
         {
@@ -255,14 +263,12 @@ def main(args):
         base_ds = get_coco_api_from_dataset(dataset_val)
 
     if args.frozen_weights is not None:
-        with torch.serialization.safe_globals([argparse.Namespace]):
-            checkpoint = torch.load(args.frozen_weights, map_location='cpu', weights_only=True)
+        checkpoint = load_local_checkpoint(args.frozen_weights)
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
     if args.pretrained:
-        with torch.serialization.safe_globals([argparse.Namespace]):
-            checkpoint = torch.load(args.pretrained, map_location='cpu', weights_only=True)
+        checkpoint = load_local_checkpoint(args.pretrained)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
@@ -276,8 +282,7 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            with torch.serialization.safe_globals([argparse.Namespace]):
-                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
+            checkpoint = load_local_checkpoint(args.resume)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:

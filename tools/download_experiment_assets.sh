@@ -69,6 +69,11 @@ esac
 
 mkdir -p "${CHECKPOINT_DIR}"
 CHECKPOINT_PATH="${CHECKPOINT_DIR}/r50_deformable_detr.pth"
+LEGACY_CHECKPOINT_PATH="${CHECKPOINT_DIR}/r50_deformable_detr-checkpoint.pth"
+if [[ "${CHECKPOINT}" == "main" && ! -s "${CHECKPOINT_PATH}" && -s "${LEGACY_CHECKPOINT_PATH}" ]]; then
+    CHECKPOINT_PATH="${LEGACY_CHECKPOINT_PATH}"
+    echo "Using existing legacy checkpoint: ${CHECKPOINT_PATH}"
+fi
 if [[ -s "${CHECKPOINT_PATH}" ]]; then
     echo "Using existing checkpoint: ${CHECKPOINT_PATH}"
 else
