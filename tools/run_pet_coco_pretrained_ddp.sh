@@ -17,6 +17,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"       # per GPU; total batch is 2 with two GPUs
 NUM_WORKERS="${NUM_WORKERS:-2}"     # per process
 MASTER_PORT="${MASTER_PORT:-29501}"
 NO_RANDOM_CROP="${NO_RANDOM_CROP:-0}"
+INIT_PET_CLASSIFIER_FROM_COCO="${INIT_PET_CLASSIFIER_FROM_COCO:-0}"
 
 # Keep CUDA ordinals aligned with nvidia-smi on mixed 3090/4090/5090 hosts.
 # Without this, CUDA's FASTEST_FIRST order can expose the 5090 as ordinal 0.
@@ -64,6 +65,9 @@ export PYTHONPATH="${PROJECT_ROOT}/models/ops${PYTHONPATH:+:${PYTHONPATH}}"
 EXTRA_ARGS=()
 if [[ "${NO_RANDOM_CROP}" == "1" ]]; then
     EXTRA_ARGS+=(--no-random-crop)
+fi
+if [[ "${INIT_PET_CLASSIFIER_FROM_COCO}" == "1" ]]; then
+    EXTRA_ARGS+=(--init-pet-classifier-from-coco)
 fi
 
 echo "Starting DDP baseline"

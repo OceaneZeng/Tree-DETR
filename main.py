@@ -24,7 +24,8 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
-from util.checkpoint import matching_state_dict
+from util.checkpoint import (initialize_pet_classifier_from_coco,
+                             matching_state_dict)
 
 
 def load_local_checkpoint(path):
@@ -122,6 +123,8 @@ def get_args_parser():
     parser.add_argument('--focal_alpha', default=0.25, type=float)
     parser.add_argument('--class_embed_lr_mult', default=1.0, type=float,
                         help='learning-rate multiplier for a newly initialized classifier')
+    parser.add_argument('--init-pet-classifier-from-coco', action='store_true',
+                        help='Initialize Pet breed logits from COCO cat/dog rows in --pretrained')
 
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
@@ -274,6 +277,13 @@ def main(args):
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
+        if args.init_pet_classifier_from_coco:
+            copied = initialize_pet_classifier_from_coco(
+                model_without_ddp, state_dict, dataset_train.coco.cats.values())
+            if copied != args.num_classes:
+                raise RuntimeError(
+                    f'Expected to initialize {args.num_classes} Pet classifier rows, copied {copied}.')
+            print(f'Initialized {copied} Pet classifier rows from COCO cat/dog weights.')
         print(f'Loaded {len(compatible)} shape-compatible pretrained tensors only; skipped={skipped}.')
         if missing_keys:
             print('Missing Keys: {}'.format(missing_keys))
