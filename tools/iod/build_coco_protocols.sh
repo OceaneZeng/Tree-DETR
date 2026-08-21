@@ -23,8 +23,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ! -f "${COCO_ROOT}/annotations/instances_train2017.json" ||
-      ! -f "${COCO_ROOT}/annotations/instances_val2017.json" ]]; then
-    echo "ERROR: COCO annotations not found under ${COCO_ROOT}" >&2
+      ! -f "${COCO_ROOT}/annotations/instances_val2017.json" ||
+      ! -d "${COCO_ROOT}/train2017" || ! -d "${COCO_ROOT}/val2017" ]]; then
+    echo "ERROR: complete COCO 2017 layout not found under ${COCO_ROOT}" >&2
+    echo "Required: train2017/, val2017/, annotations/instances_train2017.json," >&2
+    echo "         annotations/instances_val2017.json" >&2
+    echo "Download it with: bash tools/download_data.sh --root ${COCO_ROOT} --full --skip-ckpt" >&2
     exit 1
 fi
 
