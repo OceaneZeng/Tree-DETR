@@ -16,6 +16,8 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 MASTER_PORT="${MASTER_PORT:-29511}"
 SEED="${SEED:-42}"
+SKIP_DDP_EVAL="${SKIP_DDP_EVAL:-1}"
+RESUME="${RESUME:-}"
 
 TRAIN_ANN="${SPLIT_ROOT}/stage_0/instances_train2017.json"
 VAL_ANN="${SPLIT_ROOT}/stage_0/instances_val2017.json"
@@ -38,6 +40,18 @@ mkdir -p "${OUTPUT_DIR}"
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
 export PYTHONPATH="${PROJECT_ROOT}/models/ops${PYTHONPATH:+:${PYTHONPATH}}"
+EVAL_ARGS=()
+if [[ "${SKIP_DDP_EVAL}" == 1 ]]; then
+    EVAL_ARGS+=(--skip-eval)
+fi
+RESUME_ARGS=()
+if [[ -n "${RESUME}" ]]; then
+    if [[ ! -f "${RESUME}" ]]; then
+        echo "ERROR: resume checkpoint does not exist: ${RESUME}" >&2
+        exit 1
+    fi
+    RESUME_ARGS+=(--resume "${RESUME}")
+fi
 
 BASE_CLASSES="$(${PYTHON_BIN} -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["categories"]))' "${TRAIN_ANN}")"
 echo "Starting leakage-free stage-0 baseline"
@@ -67,4 +81,6 @@ cd "${PROJECT_ROOT}"
     --enc_layers 6 \
     --dec_layers 6 \
     --seed "${SEED}" \
-    --device cuda
+    --device cuda \
+    "${EVAL_ARGS[@]}" \
+    "${RESUME_ARGS[@]}"

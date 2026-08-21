@@ -52,3 +52,13 @@ SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
 CHECKPOINT="$PWD/pretrained/r50_deformable_detr-checkpoint.pth" \
 bash tools/iod/run_stage0_baseline.sh
 ```
+
+The DDP runner skips validation by default because this repository's legacy
+COCO evaluator gathers large Python objects through NCCL. Evaluate the saved
+checkpoint on one GPU after training:
+
+```bash
+SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
+CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
+bash tools/iod/eval_stage0_baseline.sh
+```

@@ -149,6 +149,8 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--skip-eval', action='store_true',
+                        help='skip validation during training; useful when DDP COCO gather is unstable')
     parser.add_argument('--eval_interval', default=1, type=int,
                         help='evaluate every N epochs; the final epoch is always evaluated')
     parser.add_argument('--num_workers', default=2, type=int)
@@ -367,8 +369,9 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        should_evaluate = ((epoch + 1) % max(1, args.eval_interval) == 0
-                           or epoch + 1 == args.epochs)
+        should_evaluate = (not getattr(args, 'skip_eval', False) and
+                            ((epoch + 1) % max(1, args.eval_interval) == 0
+                             or epoch + 1 == args.epochs))
         if should_evaluate:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
