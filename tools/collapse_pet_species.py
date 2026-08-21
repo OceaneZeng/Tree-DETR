@@ -19,14 +19,16 @@ def link_or_copy(source: Path, target: Path) -> None:
 
 
 def convert_split(source_root: Path, output_root: Path, split: str,
-                  category_to_species: dict[int, int]) -> dict:
+                  category_to_species: dict[int, int], single_class: bool) -> dict:
     ann_path = source_root / "annotations" / f"instances_{split}2017.json"
     data = json.loads(ann_path.read_text(encoding="utf-8"))
     converted = dict(data)
-    converted["categories"] = [
+    converted["categories"] = ([
+        {"id": 0, "name": "pet", "supercategory": "pet"},
+    ] if single_class else [
         {"id": 0, "name": "cat", "supercategory": "cat"},
         {"id": 1, "name": "dog", "supercategory": "dog"},
-    ]
+    ])
     annotations = []
     for annotation in data["annotations"]:
         category_id = int(annotation["category_id"])
@@ -53,6 +55,8 @@ def main() -> None:
                         help="prepared breed-level COCO split")
     parser.add_argument("--output", type=Path, required=True,
                         help="new species-level COCO split")
+    parser.add_argument("--single-class", action="store_true",
+                        help="merge cat and dog into one pet class")
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -65,14 +69,15 @@ def main() -> None:
         species = str(category.get("supercategory", "")).lower()
         if species not in {"cat", "dog"}:
             raise ValueError(f"unsupported supercategory: {species!r}")
-        category_to_species[int(category["id"])] = 0 if species == "cat" else 1
+        category_to_species[int(category["id"])] = 0 if args.single_class else (0 if species == "cat" else 1)
 
-    train = convert_split(source, output, "train", category_to_species)
-    val = convert_split(source, output, "val", category_to_species)
+    train = convert_split(source, output, "train", category_to_species, args.single_class)
+    val = convert_split(source, output, "val", category_to_species, args.single_class)
+    names = ["pet"] if args.single_class else ["cat", "dog"]
     metadata = {
         "source": str(source),
-        "num_known": 2,
-        "known_names": ["cat", "dog"],
+        "num_known": len(names),
+        "known_names": names,
         "train_images": len(train["images"]),
         "val_known_images": len(val["images"]),
     }

@@ -65,14 +65,17 @@ def initialize_pet_classifier_from_coco(model: nn.Module,
             if species not in coco_species_ids:
                 species = str(category.get("name", "")).lower()
             category_id = int(category["id"])
-            source_id = coco_species_ids.get(species)
-            if source_id is None or not 0 <= category_id < head.out_features:
+            source_ids = ([coco_species_ids["cat"], coco_species_ids["dog"]]
+                          if species in {"pet", "animal"}
+                          else [coco_species_ids.get(species)])
+            source_ids = [source_id for source_id in source_ids if source_id is not None]
+            if not source_ids or not 0 <= category_id < head.out_features:
                 continue
-            if source_id >= source_weight.shape[0]:
+            if any(source_id >= source_weight.shape[0] for source_id in source_ids):
                 raise ValueError("COCO checkpoint classifier does not contain cat/dog rows")
-            head.weight[category_id].copy_(source_weight[source_id].to(
+            head.weight[category_id].copy_(source_weight[source_ids].mean(dim=0).to(
                 device=head.weight.device, dtype=head.weight.dtype))
-            head.bias[category_id].copy_(source_bias[source_id].to(
+            head.bias[category_id].copy_(source_bias[source_ids].mean().to(
                 device=head.bias.device, dtype=head.bias.dtype))
             copied += 1
     return copied

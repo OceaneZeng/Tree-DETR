@@ -84,6 +84,21 @@ fine-grained classification and the graph-local detector experiment should not
 be interpreted as a general detection result. If species `AP50` is also low,
 the remaining problem is detector/domain transfer rather than class granularity.
 
+For a class-agnostic localization check, merge both species into one `pet`
+class. Its classifier row is initialized from the mean of COCO cat and dog:
+
+```bash
+python tools/collapse_pet_species.py --single-class \
+  --source "$PWD/data/oxford-pet-tree-detr/coco_pet_pretrained_small6" \
+  --output "$PWD/data/oxford-pet-tree-detr/coco_pet_single1"
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID GPU_LIST=0,1 EPOCHS=50 \
+  INIT_PET_CLASSIFIER_FROM_COCO=1 DATASET_NAME=coco_pet_single1 \
+  OUTPUT_DIR="$PWD/exps/pet_baseline_diagnostics/coco_pet_single1_seed42" \
+  CHECKPOINT="$PWD/pretrained/r50_deformable_detr-checkpoint.pth" \
+  bash tools/run_pet_coco_pretrained_ddp.sh
+```
+
 `setup_linux.sh` compiles the custom CUDA operator for `sm_86` by default,
 which matches the RTX 3090 cards. The visible RTX 5090 is not part of this
 default run; to compile for it, set `TORCH_CUDA_ARCH_LIST=12.0` and use a
