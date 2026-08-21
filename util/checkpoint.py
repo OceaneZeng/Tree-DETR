@@ -62,6 +62,8 @@ def initialize_pet_classifier_from_coco(model: nn.Module,
     with torch.no_grad():
         for category in categories:
             species = str(category.get("supercategory", "")).lower()
+            if species not in coco_species_ids:
+                species = str(category.get("name", "")).lower()
             category_id = int(category["id"])
             source_id = coco_species_ids.get(species)
             if source_id is None or not 0 <= category_id < head.out_features:

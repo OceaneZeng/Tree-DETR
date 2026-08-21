@@ -24,8 +24,8 @@ def convert_split(source_root: Path, output_root: Path, split: str,
     data = json.loads(ann_path.read_text(encoding="utf-8"))
     converted = dict(data)
     converted["categories"] = [
-        {"id": 0, "name": "cat", "supercategory": "animal"},
-        {"id": 1, "name": "dog", "supercategory": "animal"},
+        {"id": 0, "name": "cat", "supercategory": "cat"},
+        {"id": 1, "name": "dog", "supercategory": "dog"},
     ]
     annotations = []
     for annotation in data["annotations"]:
