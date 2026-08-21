@@ -30,7 +30,7 @@ Estimate the first-stage risk signal without changing the checkpoint:
 
 ```bash
 python tools/iod/estimate_conflict_risk.py \
-  --checkpoint pretrained/r50_deformable_detr-checkpoint.pth \
+  --checkpoint exps/iod/40+20x2/order0/stage0_base/checkpoint.pth \
   --coco-root data/coco \
   --old-ann data/coco-iod/40+20x2/order0/stage_0/instances_train2017.json \
   --new-ann data/coco-iod/40+20x2/order0/stage_1/instances_train2017.json \
@@ -41,3 +41,14 @@ python tools/iod/estimate_conflict_risk.py \
 The output contains the positive-conflict matrix and one risk value per old
 class. It must be evaluated against a later measured old-class AP drop before
 being used for replay allocation.
+
+Before estimating risk, train the stage-0 base detector. This uses the official
+checkpoint only for shared detector initialization and discards its classifier
+rows, preventing the future increment classes from leaking into the base model:
+
+```bash
+GPU_LIST=0,1 \
+SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
+CHECKPOINT="$PWD/pretrained/r50_deformable_detr-checkpoint.pth" \
+bash tools/iod/run_stage0_baseline.sh
+```

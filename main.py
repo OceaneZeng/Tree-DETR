@@ -140,6 +140,12 @@ def get_args_parser():
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--pretrained', default='',
                         help='load model weights only and start a fresh optimizer/schedule')
+    parser.add_argument('--reset-classifier', action='store_true',
+                        help='when loading --pretrained, discard all classifier rows to avoid future-class leakage')
+    parser.add_argument('--train-ann', default='',
+                        help='override the COCO training annotation JSON (supports incremental splits)')
+    parser.add_argument('--val-ann', default='',
+                        help='override the COCO validation annotation JSON (supports incremental splits)')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
@@ -276,6 +282,13 @@ def main(args):
         checkpoint = load_local_checkpoint(args.pretrained)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
+        if getattr(args, 'reset_classifier', False):
+            classifier_keys = tuple(key for key in compatible
+                                    if key.startswith('class_embed.') or
+                                    key.startswith('transformer.decoder.class_embed.'))
+            for key in classifier_keys:
+                del compatible[key]
+            print(f'Discarded {len(classifier_keys)} pretrained classifier tensors.')
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
         if args.init_pet_classifier_from_coco:
             copied = initialize_pet_classifier_from_coco(

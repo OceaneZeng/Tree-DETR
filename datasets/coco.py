@@ -187,6 +187,11 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
+    annotation_override = getattr(args, f'{image_set}_ann', '')
+    if annotation_override:
+        ann_file = Path(annotation_override)
+        if not ann_file.is_absolute():
+            ann_file = root / ann_file
     dataset = CocoDetection(img_folder, ann_file,
                             transforms=make_coco_transforms(
                                 image_set, getattr(args, 'lightweight', False),
