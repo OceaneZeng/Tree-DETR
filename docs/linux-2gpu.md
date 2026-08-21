@@ -60,6 +60,30 @@ The expected result is `AP50 >= 0.90`. A failure means that annotations,
 label IDs, transforms, evaluation, or the training path must be debugged before
 any further generalization or continual-learning experiment.
 
+## Species-level transfer diagnostic
+
+The six-breed result is strongly asymmetric: dog breeds transfer better than
+cat breeds. Collapse the same images and boxes to two species classes to test
+whether the remaining failure is fine-grained breed classification:
+
+```bash
+python tools/collapse_pet_species.py \
+  --source "$PWD/data/oxford-pet-tree-detr/coco_pet_pretrained_small6" \
+  --output "$PWD/data/oxford-pet-tree-detr/coco_pet_species2"
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID GPU_LIST=0,1 EPOCHS=50 \
+  INIT_PET_CLASSIFIER_FROM_COCO=1 \
+  DATASET_NAME=coco_pet_species2 \
+  OUTPUT_DIR="$PWD/exps/pet_baseline_diagnostics/coco_pet_species2_seed42" \
+  CHECKPOINT="$PWD/pretrained/r50_deformable_detr-checkpoint.pth" \
+  bash tools/run_pet_coco_pretrained_ddp.sh
+```
+
+If species `AP50` is high but breed `AP50` remains low, the bottleneck is
+fine-grained classification and the graph-local detector experiment should not
+be interpreted as a general detection result. If species `AP50` is also low,
+the remaining problem is detector/domain transfer rather than class granularity.
+
 `setup_linux.sh` compiles the custom CUDA operator for `sm_86` by default,
 which matches the RTX 3090 cards. The visible RTX 5090 is not part of this
 default run; to compile for it, set `TORCH_CUDA_ARCH_LIST=12.0` and use a
