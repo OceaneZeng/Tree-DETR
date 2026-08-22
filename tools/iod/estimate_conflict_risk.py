@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence
 
 import torch
 from torch.utils.data import DataLoader
+
+# Running this file directly puts tools/iod on sys.path, not the repository
+# root. Add the root explicitly so util, datasets, models, and main resolve.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import util.misc as utils
 from datasets.coco import CocoDetection, make_coco_transforms
