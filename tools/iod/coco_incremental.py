@@ -227,9 +227,11 @@ def build_split(coco_root: Path, output_root: Path, protocol: str, order_name: s
         prior_images.extend(train_ids)
         active = list(sum(original_stages[:index + 1], []))
         train_json = filter_coco(train, train_ids + memory_ids, active, mapping)
+        increment_json = filter_coco(train, train_ids, classes, mapping)
         val_json = filter_coco(val, [int(x["id"]) for x in val["images"]], active, mapping)
         stage_dir = output_root / f"stage_{index}"
         write_json(stage_dir / "instances_train2017.json", train_json)
+        write_json(stage_dir / "instances_increment_only_train2017.json", increment_json)
         write_json(stage_dir / "instances_val2017.json", val_json)
         write_json(stage_dir / "train_image_ids.json", {"image_ids": train_ids})
         write_json(stage_dir / "memory_image_ids.json", {"image_ids": memory_ids})
@@ -238,6 +240,7 @@ def build_split(coco_root: Path, output_root: Path, protocol: str, order_name: s
                        "train_image_ids": train_ids,
                        "memory_image_ids": memory_ids, "memory_size": len(memory_ids),
                        "train_annotation": str((stage_dir / "instances_train2017.json").relative_to(output_root)),
+                       "increment_annotation": str((stage_dir / "instances_increment_only_train2017.json").relative_to(output_root)),
                        "val_annotation": str((stage_dir / "instances_val2017.json").relative_to(output_root))})
     manifest = {"schema_version": 1, "protocol": protocol, "order": order_name,
                 "seed": seed, "memory_fraction": memory_fraction,

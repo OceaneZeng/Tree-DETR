@@ -42,6 +42,34 @@ The output contains the positive-conflict matrix and one risk value per old
 class. It must be evaluated against a later measured old-class AP drop before
 being used for replay allocation.
 
+To measure actual forgetting before adding any RCGC protection, run the
+unprotected increment probe. It uses the stage-1 annotation containing only
+new-class images; no old exemplar or teacher consolidation is included:
+
+```bash
+GPU_LIST=0,1 \
+SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
+BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
+bash tools/iod/run_stage1_unprotected.sh
+```
+
+Evaluate its final checkpoint with the existing single-GPU evaluation pattern,
+using stage-1's `instances_val2017.json`. The per-class AP drop from stage-0
+to this evaluation is the target for validating the M1 risk vector.
+
+After both evaluations, calculate the pre-registered diagnostic:
+
+```bash
+python tools/iod/analyze_risk_drop.py \
+  --base-eval exps/iod/40+20x2/order0/stage0_base_eval/eval.pth \
+  --increment-eval exps/iod/40+20x2/order0/stage1_unprotected_eval/eval.pth \
+  --risk exps/iod/40+20x2/order0/risk_full.json \
+  --output exps/iod/40+20x2/order0/risk_drop_analysis.json
+```
+
+The report includes risk/AP-drop Spearman correlation, risk/base-AP
+correlation (a confounding check), and top-k harm coverage.
+
 Before estimating risk, train the stage-0 base detector. This uses the official
 checkpoint only for shared detector initialization and discards its classifier
 rows, preventing the future increment classes from leaking into the base model:
