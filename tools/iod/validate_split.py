@@ -18,7 +18,7 @@ def main() -> None:
     errors = validate_manifest(manifest)
     root = args.manifest.parent
     for stage in manifest["stages"]:
-        for key in ("train_annotation", "val_annotation"):
+        for key in ("train_annotation", "increment_annotation", "val_annotation"):
             path = root / stage[key]
             if not path.is_file():
                 errors.append(f"missing {key}: {path}")
@@ -31,6 +31,11 @@ def main() -> None:
             category_ids = {int(x["id"]) for x in data.get("categories", [])}
             if any(int(x["category_id"]) not in category_ids for x in data.get("annotations", [])):
                 errors.append(f"annotation category leak in {path}")
+            if key == "increment_annotation":
+                expected = {int(x) for x in stage["classes"]}
+                actual = {int(x["category_id"]) for x in data.get("annotations", [])}
+                if not actual <= expected:
+                    errors.append(f"increment annotation contains non-increment classes in {path}")
     result = {"passed": not errors, "errors": errors}
     print(json.dumps(result, indent=2, sort_keys=True))
     raise SystemExit(0 if not errors else 1)

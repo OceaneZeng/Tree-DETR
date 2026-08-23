@@ -53,6 +53,37 @@ BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
 bash tools/iod/run_stage1_unprotected.sh
 ```
 
+The matched-budget uniform-replay control can then be run from the same base
+checkpoint. It selects old images from the stage-0 training split only and
+keeps the total replay budget fixed:
+
+```bash
+GPU_LIST=0,1 REPLAY_BUDGET=400 \
+SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
+BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
+bash tools/iod/run_stage1_uniform_replay.sh
+```
+
+This is a baseline, not the RCGC claim: it uses uniform class-balanced replay
+and the existing detector loss, without risk weighting or teacher
+consolidation. Its output is kept under `stage1_uniform_replay` so it can be
+compared with the later risk-conditioned arm at identical epochs and budget.
+
+After `estimate_conflict_risk.py` has produced `risk_full.json`, run the
+risk-weighted replay arm with the same budget:
+
+```bash
+GPU_LIST=0,1 \
+RISK_JSON="$PWD/exps/iod/40+20x2/order0/risk_full.json" \
+SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
+BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
+bash tools/iod/run_stage1_risk_replay.sh
+```
+
+This arm isolates the replay-allocation effect. It deliberately does not
+claim the full RCGC result until risk-weighted teacher consolidation is added
+and compared at the same budget.
+
 Evaluate its final checkpoint with the existing single-GPU evaluation pattern,
 using stage-1's `instances_val2017.json`. The per-class AP drop from stage-0
 to this evaluation is the target for validating the M1 risk vector.
@@ -68,7 +99,47 @@ python tools/iod/analyze_risk_drop.py \
 ```
 
 The report includes risk/AP-drop Spearman correlation, risk/base-AP
-correlation (a confounding check), and top-k harm coverage.
+correlation (a confounding check), top-k harm coverage, mean old-class AP50
+before/after the increment, and a saturation diagnostic. Treat
+`diagnostic_status=saturated_forgetting` as an invalid setting for ranking
+class-specific harm: the unprotected update erased too many old classes to
+leave a useful AP-drop distribution.
+
+## Continuation after saturated forgetting
+
+First evaluate the already-saved epoch-4 checkpoint. This costs only one
+evaluation and shows whether the final epoch-9 result merely saturated an
+earlier, more informative forgetting trajectory:
+
+```bash
+CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage1_unprotected/checkpoint0004.pth" \
+OUTPUT_DIR="$PWD/exps/iod/40+20x2/order0/stage1_unprotected_epoch4_eval" \
+bash tools/iod/eval_increment.sh
+```
+
+Then run a conservative uniform-replay pilot. Incremental learning rates are
+explicit environment variables so all later arms can use the identical
+configuration:
+
+```bash
+GPU_LIST=0,1 REPLAY_BUDGET=400 EPOCHS=5 \
+LR=2e-5 LR_BACKBONE=2e-6 LR_DROP=4 \
+OUTPUT_DIR="$PWD/exps/iod/40+20x2/order0/stage1_uniform_replay_lr2e5_e5" \
+bash tools/iod/run_stage1_uniform_replay.sh
+```
+
+Evaluate the pilot before spending compute on more arms:
+
+```bash
+CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage1_uniform_replay_lr2e5_e5/checkpoint.pth" \
+OUTPUT_DIR="$PWD/exps/iod/40+20x2/order0/stage1_uniform_replay_lr2e5_e5_eval" \
+bash tools/iod/eval_increment.sh
+```
+
+If the pilot avoids the old-class AP50 floor, freeze this configuration and
+run matched stabilized-unprotected and risk-replay arms under new output
+directories. Do not compare an arm at `2e-5` with the original unprotected
+result at `2e-4` as evidence for the replay allocation method.
 
 Before estimating risk, train the stage-0 base detector. This uses the official
 checkpoint only for shared detector initialization and discards its classifier

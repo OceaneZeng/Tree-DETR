@@ -29,6 +29,11 @@ from main import get_args_parser
 from models import build_model
 
 
+INSTANCE_TARGET_KEYS = frozenset({
+    "boxes", "labels", "area", "iscrowd", "masks", "keypoints",
+})
+
+
 def target_base_weights(model: torch.nn.Module, last_n: int) -> List[torch.nn.Parameter]:
     """Select stable shared decoder FFN weights for the gradient sketch."""
     detector = model.detr if hasattr(model, "detr") else model
@@ -79,12 +84,12 @@ def move_targets(targets: Sequence[Mapping], device: torch.device) -> List[Dict]
 
 
 def target_for_class(target: Mapping, class_id: int) -> Dict:
+    """Keep one class while preserving image-level metadata unchanged."""
     result = {key: value.clone() if torch.is_tensor(value) else value for key, value in target.items()}
     labels = target["labels"]
     keep = labels == int(class_id)
-    count = int(labels.numel())
     for key, value in target.items():
-        if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == count:
+        if key in INSTANCE_TARGET_KEYS and torch.is_tensor(value) and value.ndim > 0:
             result[key] = value[keep].clone()
     return result
 
