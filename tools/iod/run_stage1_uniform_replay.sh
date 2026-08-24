@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Matched-budget uniform replay baseline for the first COCO increment.
+# CL-DETR-style matched-budget global replay baseline for the first COCO increment.
+# In addition to replay, this arm completes current images with confident
+# foreground predictions from the frozen stage-0 teacher.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,6 +25,10 @@ LR_DROP="${LR_DROP:-40}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 CLASS_EMBED_LR_MULT="${CLASS_EMBED_LR_MULT:-1.0}"
 CLIP_MAX_NORM="${CLIP_MAX_NORM:-0.1}"
+TEACHER_SCORE_THRESHOLD="${TEACHER_SCORE_THRESHOLD:-0.5}"
+TEACHER_DUPLICATE_IOU="${TEACHER_DUPLICATE_IOU:-0.7}"
+TEACHER_GT_IOU="${TEACHER_GT_IOU:-0.5}"
+TEACHER_MAX_PER_IMAGE="${TEACHER_MAX_PER_IMAGE:-20}"
 
 NEW_ANN="${SPLIT_ROOT}/stage_1/instances_increment_only_train2017.json"
 BASE_ANN="${SPLIT_ROOT}/stage_0/instances_train2017.json"
@@ -38,6 +44,11 @@ for path in "${BASE_CHECKPOINT}" "${NEW_ANN}" "${BASE_ANN}" "${VAL_ANN}" "${MEMO
 done
 if [[ -z "${REPLAY_BUDGET}" ]]; then
     REPLAY_BUDGET="$(${PYTHON_BIN} -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["image_ids"]))' "${MEMORY_IDS}")"
+fi
+read -r -a OLD_CLASS_IDS <<< "$(${PYTHON_BIN} -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(str(int(c["id"])) for c in d.get("categories", [])))' "${BASE_ANN}")"
+if [[ "${#OLD_CLASS_IDS[@]}" -eq 0 ]]; then
+    echo "ERROR: no old class IDs found in ${BASE_ANN}" >&2
+    exit 1
 fi
 if [[ -e "${OUTPUT_DIR}/training_complete.json" ]]; then
     echo "ERROR: completed output already exists: ${OUTPUT_DIR}" >&2
@@ -84,6 +95,12 @@ cd "${PROJECT_ROOT}"
     --weight_decay "${WEIGHT_DECAY}" \
     --class_embed_lr_mult "${CLASS_EMBED_LR_MULT}" \
     --clip_max_norm "${CLIP_MAX_NORM}" \
+    --teacher-completion \
+    --teacher-old-class-ids "${OLD_CLASS_IDS[@]}" \
+    --teacher-score-threshold "${TEACHER_SCORE_THRESHOLD}" \
+    --teacher-duplicate-iou "${TEACHER_DUPLICATE_IOU}" \
+    --teacher-ground-truth-iou "${TEACHER_GT_IOU}" \
+    --teacher-max-per-image "${TEACHER_MAX_PER_IMAGE}" \
     --backbone resnet50 \
     --num_queries 300 \
     --enc_layers 6 \

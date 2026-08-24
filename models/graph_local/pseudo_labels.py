@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -28,15 +28,29 @@ def _greedy_nms(boxes_xyxy: torch.Tensor, scores: torch.Tensor,
 
 def select_teacher_pseudo_labels(outputs: Dict[str, torch.Tensor],
                                  targets: Sequence[Dict[str, torch.Tensor]],
-                                 old_num_classes: int,
+                                 old_num_classes: Optional[int] = None,
+                                 old_class_ids: Optional[Iterable[int]] = None,
                                  score_threshold: float = 0.5,
                                  duplicate_iou: float = 0.7,
                                  ground_truth_iou: float = 0.5,
                                  max_per_image: int = 20
                                  ) -> Tuple[List[Dict[str, torch.Tensor]], List[int]]:
     """Append confident old-class boxes that do not overlap current ground truth."""
-    probabilities = outputs["pred_logits"][..., :old_num_classes].sigmoid()
+    if old_class_ids is not None:
+        class_ids = [int(class_id) for class_id in old_class_ids]
+        if not class_ids:
+            raise ValueError("old_class_ids must contain at least one class")
+        if min(class_ids) < 0 or max(class_ids) >= outputs["pred_logits"].shape[-1]:
+            raise ValueError("old_class_ids contains an index outside the classifier")
+        probabilities = outputs["pred_logits"][..., class_ids].sigmoid()
+    else:
+        if old_num_classes is None or old_num_classes <= 0:
+            raise ValueError("provide a positive old_num_classes or old_class_ids")
+        class_ids = list(range(int(old_num_classes)))
+        probabilities = outputs["pred_logits"][..., :old_num_classes].sigmoid()
     query_scores, query_labels = probabilities.max(dim=-1)
+    class_id_tensor = torch.as_tensor(class_ids, device=query_labels.device)
+    query_labels = class_id_tensor[query_labels]
     query_boxes = outputs["pred_boxes"]
     completed = []
     counts = []
@@ -80,7 +94,8 @@ def select_teacher_pseudo_labels(outputs: Dict[str, torch.Tensor],
 @torch.no_grad()
 def complete_targets_with_teacher(teacher: nn.Module, samples,
                                   targets: Sequence[Dict[str, torch.Tensor]],
-                                  old_num_classes: int,
+                                  old_num_classes: Optional[int] = None,
+                                  old_class_ids: Optional[Iterable[int]] = None,
                                   score_threshold: float = 0.5,
                                   duplicate_iou: float = 0.7,
                                   ground_truth_iou: float = 0.5,
@@ -93,6 +108,7 @@ def complete_targets_with_teacher(teacher: nn.Module, samples,
         outputs,
         targets,
         old_num_classes=old_num_classes,
+        old_class_ids=old_class_ids,
         score_threshold=score_threshold,
         duplicate_iou=duplicate_iou,
         ground_truth_iou=ground_truth_iou,

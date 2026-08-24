@@ -53,21 +53,24 @@ BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
 bash tools/iod/run_stage1_unprotected.sh
 ```
 
-The matched-budget uniform-replay control can then be run from the same base
-checkpoint. It selects old images from the stage-0 training split only and
-keeps the total replay budget fixed:
+The CCF-A **CL-DETR-style global replay baseline** can then be run from the
+same base checkpoint. It selects old images from the stage-0 training split
+only, keeps the total replay budget fixed, and completes current images with
+confident foreground predictions from the frozen stage-0 teacher:
 
 ```bash
 GPU_LIST=0,1 REPLAY_BUDGET=400 \
 SPLIT_ROOT="$PWD/data/coco-iod/40+20x2/order0" \
 BASE_CHECKPOINT="$PWD/exps/iod/40+20x2/order0/stage0_base/checkpoint.pth" \
-bash tools/iod/run_stage1_uniform_replay.sh
+bash tools/iod/run_stage1_cl_detr_baseline.sh
 ```
 
-This is a baseline, not the RCGC claim: it uses uniform class-balanced replay
-and the existing detector loss, without risk weighting or teacher
-consolidation. Its output is kept under `stage1_uniform_replay` so it can be
-compared with the later risk-conditioned arm at identical epochs and budget.
+The legacy `run_stage1_uniform_replay.sh` entry point remains available and now
+uses the same CL-DETR-style teacher completion. This is a baseline, not the
+RCGC claim: replay is uniform across old classes, and there is no risk weighting
+or graph-local allocation. Its output is kept under `stage1_cl_detr_global_replay`
+when using the explicit entry point so it can be compared with later arms at
+identical epochs and budget.
 
 After `estimate_conflict_risk.py` has produced `risk_full.json`, run the
 risk-weighted replay arm with the same budget:

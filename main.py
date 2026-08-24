@@ -9,6 +9,7 @@
 
 
 import argparse
+import copy
 import datetime
 import json
 import random
@@ -162,6 +163,15 @@ def get_args_parser():
     parser.add_argument('--no-random-crop', action='store_true',
                         help='Keep flips and multi-scale resize but disable the COCO random-crop branch')
 
+    parser.add_argument('--teacher-completion', action='store_true',
+                        help='Complete current targets with confident frozen-teacher old-class boxes')
+    parser.add_argument('--teacher-old-class-ids', type=int, nargs='+', default=None,
+                        help='Classifier row IDs eligible for teacher completion; required with --teacher-completion')
+    parser.add_argument('--teacher-score-threshold', default=0.5, type=float)
+    parser.add_argument('--teacher-duplicate-iou', default=0.7, type=float)
+    parser.add_argument('--teacher-ground-truth-iou', default=0.5, type=float)
+    parser.add_argument('--teacher-max-per-image', default=20, type=int)
+
     return parser
 
 
@@ -196,6 +206,7 @@ def main(args):
     criterion.to(device)
 
     model_without_ddp = model
+    teacher_model = None
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
@@ -280,6 +291,8 @@ def main(args):
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+    if args.teacher_completion and not args.pretrained:
+        raise ValueError('--teacher-completion requires --pretrained so the base teacher is explicit')
     if args.pretrained:
         checkpoint = load_local_checkpoint(args.pretrained)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
@@ -304,6 +317,18 @@ def main(args):
             print('Missing Keys: {}'.format(missing_keys))
         if unexpected_keys:
             print('Unexpected Keys: {}'.format(unexpected_keys))
+
+        if args.teacher_completion:
+            if args.teacher_old_class_ids is None:
+                raise ValueError('--teacher-completion requires --teacher-old-class-ids')
+            if not args.teacher_old_class_ids:
+                raise ValueError('--teacher-old-class-ids must not be empty')
+            teacher_model = copy.deepcopy(model_without_ddp).to(device)
+            teacher_model.eval()
+            for parameter in teacher_model.parameters():
+                parameter.requires_grad_(False)
+            print('Enabled frozen-teacher global label completion for {} old classes.'.format(
+                len(args.teacher_old_class_ids)))
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -353,7 +378,13 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm,
+            teacher=teacher_model,
+            teacher_old_class_ids=args.teacher_old_class_ids,
+            teacher_score_threshold=args.teacher_score_threshold,
+            teacher_duplicate_iou=args.teacher_duplicate_iou,
+            teacher_ground_truth_iou=args.teacher_ground_truth_iou,
+            teacher_max_per_image=args.teacher_max_per_image)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
