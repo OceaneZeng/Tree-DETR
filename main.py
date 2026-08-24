@@ -348,7 +348,6 @@ def main(args):
         if len(unexpected_keys) > 0:
             print('Unexpected Keys: {}'.format(unexpected_keys))
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            import copy
             p_groups = copy.deepcopy(optimizer.param_groups)
             optimizer.load_state_dict(checkpoint['optimizer'])
             for pg, pg_old in zip(optimizer.param_groups, p_groups):
