@@ -64,6 +64,7 @@ from models.graph_local.losses import (
 from models.graph_local.pseudo_labels import complete_targets_with_teacher
 from models.graph_local.replay import build_increment_annotation
 import util.misc as utils
+from util.experiment_log import start_file_logging, stop_file_logging
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -495,6 +496,7 @@ def main() -> int:
     known_val_ann = resolve_annotation(coco_path, args.known_val_ann)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    file_log_state = start_file_logging(args, is_main_process=True)
 
     known_val = build_dataset(coco_path, known_val_ann, "val", args)
     increment_val = build_dataset(coco_path, increment_val_ann, "val", args)
@@ -531,6 +533,7 @@ def main() -> int:
             "graph locality and continual-learning claims were not tested")
         write_json(output_dir / "summary.json", summary)
         print(json.dumps(summary, indent=2))
+        stop_file_logging(file_log_state)
         return 0
 
     if args.module_ablations and "graph" not in args.arms:
@@ -545,6 +548,7 @@ def main() -> int:
         summary["sketch_matches"] = {str(key): value for key, value in sketch_counts.items()}
         write_json(output_dir / "summary.json", summary)
         print(json.dumps(summary, indent=2))
+        stop_file_logging(file_log_state)
         return 0
 
     class_ids, conflict = build_conflict_matrix(sketches)
@@ -655,6 +659,7 @@ def main() -> int:
             "Compare graph versus random/global arms across three seeds before any research claim")
     write_json(output_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2))
+    stop_file_logging(file_log_state)
     return 0
 
 

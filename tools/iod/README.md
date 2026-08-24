@@ -1,5 +1,11 @@
 # COCO incremental protocol
 
+Every training entry point writes a human-readable rank-0 console trace to the
+root `log/` directory and keeps the structured per-epoch metrics there as well:
+`log/<experiment-output-path>/train.log` and `log/<experiment-output-path>/log.txt`.
+Use `--log-file` to choose another path or
+`--no-file-log` only for an intentional local smoke test.
+
 Build a reproducible, disjoint-image COCO split:
 
 ```bash

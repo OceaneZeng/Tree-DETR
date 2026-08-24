@@ -27,6 +27,7 @@ from engine import evaluate, train_one_epoch
 from models import build_model
 from util.checkpoint import (initialize_pet_classifier_from_coco,
                              matching_state_dict)
+from util.experiment_log import experiment_log_path, start_file_logging, stop_file_logging
 
 
 def load_local_checkpoint(path):
@@ -171,12 +172,17 @@ def get_args_parser():
     parser.add_argument('--teacher-duplicate-iou', default=0.7, type=float)
     parser.add_argument('--teacher-ground-truth-iou', default=0.5, type=float)
     parser.add_argument('--teacher-max-per-image', default=20, type=int)
+    parser.add_argument('--log-file', default='', type=str,
+                        help='Human-readable log; relative paths are placed under the root log directory')
+    parser.add_argument('--no-file-log', action='store_true',
+                        help='Disable the rank-0 human-readable experiment log')
 
     return parser
 
 
 def main(args):
     utils.init_distributed_mode(args)
+    file_log_state = start_file_logging(args, utils.is_main_process())
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
@@ -369,6 +375,7 @@ def main(args):
                                               data_loader_val, base_ds, device, args.output_dir)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        stop_file_logging(file_log_state)
         return
 
     print("Start training")
@@ -416,7 +423,9 @@ def main(args):
                      'n_parameters': n_parameters}
 
         if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
+            structured_log = experiment_log_path(output_dir, "log.txt")
+            structured_log.parent.mkdir(parents=True, exist_ok=True)
+            with structured_log.open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs
@@ -437,6 +446,7 @@ def main(args):
         with (output_dir / 'training_complete.json').open('w') as f:
             json.dump({'epochs': args.epochs, 'last_epoch': args.epochs - 1,
                        'training_time_seconds': int(total_time)}, f)
+    stop_file_logging(file_log_state)
 
 
 if __name__ == '__main__':
