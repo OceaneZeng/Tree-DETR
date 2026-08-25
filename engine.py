@@ -21,6 +21,7 @@ from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
 from models.graph_local.pseudo_labels import complete_targets_with_teacher
+from models.owod_metrics import compute_owod_metrics
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -102,13 +103,16 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir):
+def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir,
+             owod_known_class_ids=None, owod_unknown_threshold=0.5):
     model.eval()
     criterion.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Test:'
+    owod_predictions = []
+    owod_targets = []
 
     iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
@@ -147,6 +151,13 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             target_sizes = torch.stack([t["size"] for t in targets], dim=0)
             results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
         res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+        if owod_known_class_ids is not None:
+            owod_predictions.extend([
+                {key: value.detach().cpu() for key, value in result.items()
+                 if torch.is_tensor(value)} for result in results])
+            owod_targets.extend([
+                {key: value.detach().cpu() for key, value in target.items()
+                 if torch.is_tensor(value)} for target in targets])
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
@@ -185,4 +196,18 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats['PQ_all'] = panoptic_res["All"]
         stats['PQ_th'] = panoptic_res["Things"]
         stats['PQ_st'] = panoptic_res["Stuff"]
+    if owod_known_class_ids is not None:
+        if is_dist_avail_and_initialized():
+            gathered_predictions = [None for _ in range(utils.get_world_size())]
+            gathered_targets = [None for _ in range(utils.get_world_size())]
+            torch.distributed.all_gather_object(gathered_predictions, owod_predictions)
+            torch.distributed.all_gather_object(gathered_targets, owod_targets)
+            owod_predictions = [item for batch in gathered_predictions for item in batch]
+            owod_targets = [item for batch in gathered_targets for item in batch]
+        owod_stats = compute_owod_metrics(
+            owod_predictions, owod_targets, owod_known_class_ids,
+            threshold=owod_unknown_threshold)
+        stats.update({f'owod_{key.lower().replace("-", "_")}': value
+                      for key, value in owod_stats.items()})
+        print("OWOD metrics:", owod_stats)
     return stats, coco_evaluator

@@ -16,6 +16,40 @@ non-zero graph selection, balanced replay, pseudo-label filtering, local-margin
 gradients, off-neighborhood projection, and LoRA merge equivalence. It is not a
 positive result for the locality hypothesis.
 
+## Optional trainable GNN estimator
+
+The default runner uses the transparent gradient-cosine estimator. The
+trainable GNN is an optional stage-level side-car: it consumes compressed class
+gradient sketches from the frozen detector and predicts directed harm scores;
+it is not inserted into the detector backbone or image-level forward pass.
+
+Every increment run writes `gnn_stage.pt`. The artifact contains compressed
+class sketches, the empirical one-step harm row for the probed new class, and a
+validity mask so unmeasured source rows are not treated as zero-harm labels.
+Train a GNN only from **prior** stage artifacts:
+
+```powershell
+C:\Users\23642\miniconda3\envs\tree-detr\python.exe `
+  tools\graph_local\train_gnn.py `
+  --stages exps\pet_graph_local\increment_seed42\gnn_stage.pt `
+           exps\pet_graph_local\increment_seed43\gnn_stage.pt `
+  --output exps\pet_graph_local\class_interference_gnn.pt
+```
+
+Use the learned estimator for a later increment by passing its checkpoint:
+
+```powershell
+C:\Users\23642\miniconda3\envs\tree-detr\python.exe `
+  tools\graph_local\run_increment.py `
+  --graph-estimator gnn `
+  --gnn-checkpoint exps\pet_graph_local\class_interference_gnn.pt `
+  ...
+```
+
+The runner rejects GNN mode without a checkpoint. This preserves the causal
+protocol: the current stage's probe harm is saved for future GNN training, but
+does not train or select the neighborhood used by that same stage.
+
 ## What the script runs
 
 `tools/windows/run_graph_local_pet.ps1` uses a fixed Oxford-IIIT Pet split:

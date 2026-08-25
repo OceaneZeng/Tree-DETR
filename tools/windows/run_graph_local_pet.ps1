@@ -14,6 +14,9 @@ param(
     [switch]$ForceBaseline,
     [switch]$RunDespiteQualityGate,
     [switch]$ModuleAblations,
+    [ValidateSet('cosine', 'gnn')]
+    [string]$GraphEstimator = 'cosine',
+    [string]$GnnCheckpoint = '',
     [string]$OutputTag = '',
     [string]$Python = 'C:\Users\23642\miniconda3\envs\tree-detr\python.exe'
 )
@@ -107,8 +110,14 @@ $Arguments = @(
     '--increment-epochs', $IncrementEpochs,
     '--replay-budget', $ReplayBudget,
     '--min-matched-per-class', $MinMatchedPerClass,
+    '--graph-estimator', $GraphEstimator,
     '--seed', $Seed
 )
+if ($GraphEstimator -eq 'gnn') {
+    if (-not $GnnCheckpoint) { throw '-GnnCheckpoint is required when -GraphEstimator gnn' }
+    $ResolvedGnnCheckpoint = (Resolve-Path -LiteralPath $GnnCheckpoint).Path
+    $Arguments += @('--gnn-checkpoint', $ResolvedGnnCheckpoint)
+}
 if ($RunDespiteQualityGate) { $Arguments += '--run-despite-quality-gate' }
 if ($ModuleAblations) { $Arguments += '--module-ablations' }
 

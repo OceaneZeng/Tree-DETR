@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from .interference import build_conflict_matrix, evaluate_neighborhood, select_positive_neighbors
+from .gnn import ClassInterferenceGNN, fit_interference_gnn, select_gnn_neighbors
 from .lora import LoRALinear
 from .losses import local_margin_loss, projection_loss
 from .pseudo_labels import select_teacher_pseudo_labels
@@ -51,6 +52,34 @@ def run_preflight() -> Dict[str, object]:
         graph_gain,
         neighbors == [0] and graph_gain >= 0.30,
         "top-1 graph neighbor is harmed class 0 and gain over random >= 0.30",
+    )
+
+    # The learned side-car receives stage-level class features and must recover
+    # the same directed harm ordering without touching a detector backbone.
+    gnn_features = torch.tensor([
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+    ])
+    gnn_harm = torch.tensor([
+        [0.0, 0.9, 0.1],
+        [0.1, 0.0, 0.9],
+        [0.9, 0.1, 0.0],
+    ])
+    gnn_mask = torch.ones(3, 3, dtype=torch.bool)
+    gnn_mask.fill_diagonal_(False)
+    gnn = ClassInterferenceGNN(3, hidden_dim=16, message_steps=1)
+    gnn_history = fit_interference_gnn(
+        gnn, [{"features": gnn_features, "harm": gnn_harm, "valid_mask": gnn_mask}],
+        epochs=80, lr=1e-2,
+    )
+    gnn_prediction = gnn(gnn_features)
+    gnn_neighbors = [class_id for class_id, _score in select_gnn_neighbors(
+        [0, 1, 2], gnn_prediction["edge_prob"], source_class=2, k=1)]
+    gates["G2_trainable_gnn_predicts_harm"] = _gate(
+        float(gnn_history[0] - gnn_history[-1]),
+        gnn_neighbors == [0] and gnn_history[-1] < gnn_history[0],
+        "trained GNN recovers source-2 -> target-0 as the top harmful edge",
     )
 
     coco = {

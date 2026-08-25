@@ -28,6 +28,7 @@ from models import build_model
 from util.checkpoint import (initialize_pet_classifier_from_coco,
                              matching_state_dict)
 from util.experiment_log import experiment_log_path, start_file_logging, stop_file_logging
+from models.owod_baselines import BASELINES, baseline_config_dict, normalize_baseline
 
 
 def load_local_checkpoint(path):
@@ -64,6 +65,20 @@ def get_args_parser():
     parser.add_argument('--two_stage', default=False, action='store_true')
     parser.add_argument('--with_tree', action='store_true',
                         help='Enable the experimental Tree-DETR EE-0 flat-tree losses and adapters')
+
+    parser.add_argument('--owod-baseline', default='vanilla_d_detr',
+                        choices=sorted(BASELINES),
+                        help='OWOD protocol baseline: vanilla_d_detr, ore_star, ow_detr, prob, or oracle')
+    parser.add_argument('--owod-manifest', default='',
+                        help='S-OWODB/M-OWODB split manifest used for this run')
+    parser.add_argument('--owod-stage', default=None, type=int,
+                        help='Stage index in --owod-manifest, recorded in run metadata')
+    parser.add_argument('--unknown-threshold', default=0.5, type=float,
+                        help='Threshold used to mark post-processed predictions as unknown')
+    parser.add_argument('--objectness-loss-coef', default=1.0, type=float,
+                        help='Loss coefficient for OW-DETR/PROB foreground objectness')
+    parser.add_argument('--owod-known-class-ids', type=int, nargs='+', default=None,
+                        help='Known category IDs for U-Recall/A-OSE/WI evaluation on full labels')
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -183,6 +198,14 @@ def get_args_parser():
 def main(args):
     utils.init_distributed_mode(args)
     file_log_state = start_file_logging(args, utils.is_main_process())
+    args.owod_baseline = normalize_baseline(args.owod_baseline)
+    if utils.is_main_process() and args.output_dir:
+        run_config = vars(args).copy()
+        run_config.update({'owod_baseline_config': baseline_config_dict(args.owod_baseline)})
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        with (Path(args.output_dir) / 'run_config.json').open('w', encoding='utf-8') as handle:
+            json.dump(run_config, handle, indent=2, sort_keys=True, default=str)
+        print('OWOD baseline:', json.dumps(baseline_config_dict(args.owod_baseline), sort_keys=True))
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
@@ -366,12 +389,16 @@ def main(args):
         # check the resumed model
         if not args.eval and not getattr(args, 'skip_eval', False):
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir,
+                owod_known_class_ids=args.owod_known_class_ids,
+                owod_unknown_threshold=args.unknown_threshold,
             )
     
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
+                                              data_loader_val, base_ds, device, args.output_dir,
+                                              owod_known_class_ids=args.owod_known_class_ids,
+                                              owod_unknown_threshold=args.unknown_threshold)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         stop_file_logging(file_log_state)
@@ -411,7 +438,9 @@ def main(args):
                              or epoch + 1 == args.epochs))
         if should_evaluate:
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir,
+                owod_known_class_ids=args.owod_known_class_ids,
+                owod_unknown_threshold=args.unknown_threshold,
             )
         else:
             test_stats, coco_evaluator = {}, None

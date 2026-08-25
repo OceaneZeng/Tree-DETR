@@ -48,6 +48,11 @@ from models.graph_local.interference import (
     flatten_gradients,
     select_positive_neighbors,
 )
+from models.graph_local.gnn import (
+    compress_gradient_sketches,
+    load_gnn_checkpoint,
+    select_gnn_neighbors,
+)
 from models.graph_local.lora import (
     expand_classification_head,
     freeze_for_increment,
@@ -88,6 +93,14 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--last-decoder-layers", type=int, default=2)
     parser.add_argument("--graph-k", type=int, default=5)
+    parser.add_argument("--graph-estimator", choices=("cosine", "gnn"), default="cosine",
+                        help="stage-local graph estimator; GNN requires a checkpoint trained on prior stages")
+    parser.add_argument("--gnn-checkpoint", default="",
+                        help="versioned ClassInterferenceGNN checkpoint for --graph-estimator gnn")
+    parser.add_argument("--gnn-min-score", type=float, default=0.0,
+                        help="minimum GNN edge probability before top-k selection")
+    parser.add_argument("--gnn-feature-dim", type=int, default=128,
+                        help="pooled gradient-sketch dimension used by the GNN")
     parser.add_argument("--min-conflict", type=float, default=0.0)
     parser.add_argument("--replay-budget", type=int, default=64)
     parser.add_argument("--probe-lr", type=float, default=1e-4)
@@ -360,6 +373,80 @@ def make_random_neighborhood(old_class_ids: Sequence[int], size: int, seed: int)
     return sorted(rng.sample(list(old_class_ids), min(size, len(old_class_ids))))
 
 
+def estimate_graph_neighbors(sketches: Mapping[int, torch.Tensor], args,
+                             source_class: int, device: torch.device
+                             ) -> Tuple[List[int], List[Tuple[int, float]], Dict[str, object]]:
+    """Estimate the source-class neighborhood with the selected graph estimator."""
+    class_ids = sorted(int(class_id) for class_id in sketches)
+    if args.graph_estimator == "cosine":
+        _, conflict = build_conflict_matrix(sketches)
+        scored = select_positive_neighbors(
+            class_ids, conflict, source_class, k=args.graph_k,
+            min_conflict=args.min_conflict)
+        return [class_id for class_id, _score in scored], scored, {
+            "name": "gradient_cosine",
+            "feature_dim": int(next(iter(sketches.values())).numel()),
+        }
+    if not args.gnn_checkpoint:
+        raise ValueError(
+            "--gnn-checkpoint is required when --graph-estimator gnn; "
+            "train it from prior stage artifacts with tools/graph_local/train_gnn.py"
+        )
+    gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device=device)
+    gnn_class_ids, features = compress_gradient_sketches(
+        sketches, output_dim=gnn.input_dim)
+    if gnn_class_ids != class_ids:
+        raise RuntimeError("GNN class feature order does not match gradient sketch order")
+    with torch.no_grad():
+        prediction = gnn(features.to(device))
+    scored = select_gnn_neighbors(
+        class_ids, prediction["edge_prob"].cpu(), source_class,
+        k=args.graph_k, min_score=args.gnn_min_score)
+    return [class_id for class_id, _score in scored], scored, {
+        "name": "trainable_class_interference_gnn",
+        "checkpoint": str(Path(args.gnn_checkpoint).resolve()),
+        "feature_dim": gnn.input_dim,
+        "config": gnn.config(),
+        "metadata": metadata,
+    }
+
+
+def save_gnn_stage_artifact(path: Path, sketches: Mapping[int, torch.Tensor],
+                            harm: Mapping[int, float], source_class: int,
+                            feature_dim: int) -> Dict[str, object]:
+    """Save a masked historical stage for training a future GNN.
+
+    Only the probed source row is valid.  Treating all unprobed source rows as
+    zero harm would teach the GNN an artificial negative label distribution.
+    """
+    class_ids, features = compress_gradient_sketches(sketches, output_dim=feature_dim)
+    size = len(class_ids)
+    harm_matrix = torch.zeros(size, size, dtype=torch.float32)
+    valid_mask = torch.zeros(size, size, dtype=torch.bool)
+    source_index = class_ids.index(int(source_class))
+    for target_index, class_id in enumerate(class_ids):
+        if target_index == source_index or int(class_id) not in harm:
+            continue
+        harm_matrix[source_index, target_index] = float(max(0.0, harm[int(class_id)]))
+        valid_mask[source_index, target_index] = True
+    payload = {
+        "schema_version": 1,
+        "class_ids": class_ids,
+        "features": features.cpu(),
+        "harm": harm_matrix,
+        "valid_mask": valid_mask,
+        "source_class": int(source_class),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    return {
+        "path": str(path),
+        "class_count": size,
+        "feature_dim": int(features.shape[1]),
+        "valid_harm_edges": int(valid_mask.sum().item()),
+    }
+
+
 def run_increment_arm(name: str, args, base_num_classes: int, total_num_classes: int,
                       checkpoint: Path, teacher, train_annotation: Path, eval_dataset,
                       sketches: Mapping[int, torch.Tensor], neighborhood: Sequence[int],
@@ -551,10 +638,11 @@ def main() -> int:
         stop_file_logging(file_log_state)
         return 0
 
-    class_ids, conflict = build_conflict_matrix(sketches)
-    scored_neighbors = select_positive_neighbors(
-        class_ids, conflict, args.new_class, k=args.graph_k, min_conflict=args.min_conflict)
-    graph_neighbors = [class_id for class_id, _score in scored_neighbors]
+    try:
+        graph_neighbors, scored_neighbors, graph_estimator = estimate_graph_neighbors(
+            sketches, args, args.new_class, device)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     old_class_ids = list(range(base_num_classes))
 
     probe_model = copy.deepcopy(base_model)
@@ -563,6 +651,10 @@ def main() -> int:
     one_step_probe(probe_model, base_criterion, probe_loader, base_num_classes, args, device)
     harm, harm_counts = measure_harm(
         base_model, probe_model, base_criterion, increment_val, old_class_ids, args, device)
+    gnn_stage_artifact = save_gnn_stage_artifact(
+        output_dir / "gnn_stage.pt", sketches, harm, args.new_class,
+        feature_dim=int(graph_estimator["feature_dim"] if args.graph_estimator == "gnn"
+                        else args.gnn_feature_dim))
     neighborhood_eval = evaluate_neighborhood(
         graph_neighbors, harm, k=len(graph_neighbors),
         random_trials=args.harm_random_trials, seed=args.seed)
@@ -636,6 +728,8 @@ def main() -> int:
         "probe_matches": {str(key): value for key, value in harm_counts.items()},
         "graph_neighbors": [{"class_id": class_id, "conflict": score}
                             for class_id, score in scored_neighbors],
+        "graph_estimator": graph_estimator,
+        "gnn_stage_artifact": gnn_stage_artifact,
         "neighborhood_diagnostic": neighborhood_eval,
         "arms": arms,
     })
