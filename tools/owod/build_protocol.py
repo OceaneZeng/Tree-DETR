@@ -44,7 +44,7 @@ def category_order(categories: Sequence[Mapping], mode: str, seed: int) -> list[
 
 
 def load_groups(path: Path | None, categories: Sequence[Mapping], protocol: str,
-                order: Sequence[int]) -> tuple[list[list[int]], str]:
+                order: Sequence[int], allow_heuristic: bool = False) -> tuple[list[list[int]], str]:
     if protocol == "m-owodb":
         if len(order) != 80:
             raise ValueError(f"M-OWODB expects 80 categories, found {len(order)}")
@@ -59,6 +59,10 @@ def load_groups(path: Path | None, categories: Sequence[Mapping], protocol: str,
             raise ValueError("--groups-json must partition every COCO category exactly once")
         return result, "user_supplied_groups"
 
+    if not allow_heuristic:
+        raise ValueError(
+            "S-OWODB requires the official class grouping via --groups-json; "
+            "use --allow-heuristic-groups only for non-paper smoke tests")
     by_supercategory: dict[str, list[int]] = defaultdict(list)
     for category in categories:
         by_supercategory[str(category.get("supercategory", "unknown"))].append(int(category["id"]))
@@ -72,11 +76,14 @@ def load_groups(path: Path | None, categories: Sequence[Mapping], protocol: str,
 
 
 def build(coco_root: Path, output_root: Path, protocol: str, order_mode: str,
-          seed: int, memory_fraction: float, groups_path: Path | None) -> dict:
+          seed: int, memory_fraction: float, groups_path: Path | None,
+          allow_heuristic_groups: bool = False) -> dict:
     train = read_json(coco_root / "annotations" / "instances_train2017.json")
     val = read_json(coco_root / "annotations" / "instances_val2017.json")
     order = category_order(train["categories"], order_mode, seed)
-    stages, grouping_source = load_groups(groups_path, train["categories"], protocol, order)
+    stages, grouping_source = load_groups(
+        groups_path, train["categories"], protocol, order,
+        allow_heuristic=allow_heuristic_groups)
     mapping = {category_id: category_id for category_id in order}
     assignments = assign_images(train["images"], train["annotations"], stages, seed)
     prior_images: list[int] = []
@@ -126,9 +133,12 @@ def main() -> None:
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--memory-fraction", default=0.10, type=float)
     parser.add_argument("--groups-json", default=None, type=Path)
+    parser.add_argument("--allow-heuristic-groups", action="store_true",
+                        help="allow a non-paper supercategory grouping for smoke tests")
     args = parser.parse_args()
     manifest = build(args.coco_root, args.output_root, args.protocol, args.order,
-                     args.seed, args.memory_fraction, args.groups_json)
+                     args.seed, args.memory_fraction, args.groups_json,
+                     args.allow_heuristic_groups)
     print(json.dumps(manifest["integrity"], indent=2, sort_keys=True))
 
 

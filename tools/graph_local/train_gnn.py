@@ -27,6 +27,7 @@ from models.graph_local.gnn import (  # noqa: E402
     fit_interference_gnn,
     save_gnn_checkpoint,
 )
+from util.experiment_log import start_file_logging, stop_file_logging
 
 
 def set_seed(seed: int) -> None:
@@ -62,6 +63,8 @@ def main() -> int:
                         help="one or more prior gnn_stage.pt files")
     parser.add_argument("--output", type=Path, required=True,
                         help="output ClassInterferenceGNN checkpoint")
+    parser.add_argument("--log-file", type=Path, default=None,
+                        help="human-readable log path; defaults beside the checkpoint")
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--message-steps", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -71,6 +74,17 @@ def main() -> int:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    args.output_dir = args.output.parent
+    args.no_file_log = False
+    args.log_file = str(args.log_file) if args.log_file is not None else ""
+    log_state = start_file_logging(args, is_main_process=True)
+    try:
+        return _run(args, parser)
+    finally:
+        stop_file_logging(log_state)
+
+
+def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     set_seed(args.seed)
 
     stages = [load_stage(path) for path in args.stages]
@@ -104,4 +118,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

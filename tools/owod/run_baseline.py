@@ -60,6 +60,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--gpus", default="", help="CUDA_VISIBLE_DEVICES, optional")
+    parser.add_argument("--nproc-per-node", default=1, type=int,
+                        help="number of DDP processes; use 2 for the requested dual-card run")
+    parser.add_argument("--master-port", default=29521, type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--extra-main-arg", action="append", default=[],
                         help="Additional argument passed to main.py; repeatable")
@@ -68,7 +71,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 def build_command(args: argparse.Namespace) -> list[str]:
     method = normalize_baseline(args.method)
-    command = [sys.executable, str(PROJECT_ROOT / "main.py"),
+    main_command = [str(PROJECT_ROOT / "main.py"),
                "--coco_path", str(args.coco_path),
                "--train-ann", str(args.train_ann), "--val-ann", str(args.val_ann),
                "--output_dir", str(args.output_dir),
@@ -77,8 +80,20 @@ def build_command(args: argparse.Namespace) -> list[str]:
                "--seed", str(args.seed), "--device", args.device,
                "--owod-baseline", method,
                "--log-file", str(args.output_dir / "train.log")]
+    nproc_per_node = int(getattr(args, "nproc_per_node", 1))
+    master_port = int(getattr(args, "master_port", 29521))
+    if nproc_per_node > 1:
+        command = [sys.executable, "-m", "torch.distributed.run", "--standalone",
+                   "--nproc_per_node", str(nproc_per_node),
+                   "--master_port", str(master_port)] + main_command
+    else:
+        command = [sys.executable] + main_command
     if args.pretrained is not None:
         command += ["--pretrained", str(args.pretrained)]
+    if getattr(args, "stage", None) == 0:
+        # The official COCO checkpoint contains future-class classifier rows.
+        # Discard them for the OWOD base stage to avoid label leakage.
+        command.append("--reset-classifier")
     if getattr(args, "known_class_ids", None):
         command += ["--owod-known-class-ids"] + [str(value) for value in args.known_class_ids]
     for item in args.extra_main_arg:

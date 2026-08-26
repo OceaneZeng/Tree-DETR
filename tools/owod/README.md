@@ -12,9 +12,13 @@ python tools/owod/build_protocol.py \
   --protocol s-owodb --order random --seed 42
 ```
 
-For exact S-OWODB reproduction, pass the official class grouping through
-`--groups-json`. The generated manifest records whether grouping was supplied
-or generated heuristically. M-OWODB uses four 20-class stages.
+S-OWODB (Strict OWODB) keeps semantically related COCO categories in the same
+super-category-based task partition, avoiding the mixed-supercategory leakage
+of historical M-OWODB. For exact S-OWODB reproduction, the official class
+grouping must be passed through `--groups-json`; the builder refuses to invent
+a grouping unless `--allow-heuristic-groups` is explicitly used for a smoke
+test. M-OWODB is the historical mixed-supercategory protocol with four
+20-class stages.
 
 ## Run a baseline
 
@@ -29,8 +33,10 @@ python tools/owod/run_baseline.py \
   --output-dir exps/owod/s-owodb/order0/prob/stage_0
 ```
 
-Available methods are `vanilla_d_detr`, `ore_star`, `ow_detr`, `prob`, and
-`oracle`. Every run writes the exact command and metadata to the output
+Available method names are `vanilla_d_detr`, `ore_star`, `ow_detr`, `prob`, and
+`oracle`. They must only be reported as paper baselines after the corresponding
+paper-faithful implementation is verified; a shared detector with a renamed
+unknown score is not a valid reproduction. Every run writes the exact command and metadata to the output
 directory, while `main.py` writes both a human-readable `train.log` and
 structured per-epoch `log.txt`. When a full-label validation annotation and a
 manifest are supplied, the same log also includes `owod_u_recall`,
