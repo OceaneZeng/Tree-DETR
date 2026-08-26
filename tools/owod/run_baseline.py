@@ -136,10 +136,12 @@ def main() -> int:
     if args.dry_run:
         print(shlex.join(command))
         return 0
-    env = None
+    import os
+    env = os.environ.copy()
+    ops_path = str(PROJECT_ROOT / "models" / "ops")
+    env["PYTHONPATH"] = ops_path + os.pathsep + env.get("PYTHONPATH", "")
+    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     if args.gpus:
-        import os
-        env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = args.gpus
     completed = subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False)
     return int(completed.returncode)

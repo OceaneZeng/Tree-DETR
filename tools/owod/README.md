@@ -30,7 +30,8 @@ python tools/owod/run_baseline.py \
   --val-ann data/coco-owod/s-owodb/order0/stage_0/instances_val2017_full.json \
   --manifest data/coco-owod/s-owodb/order0/split_manifest.json \
   --stage 0 \
-  --output-dir exps/owod/s-owodb/order0/prob/stage_0
+  --output-dir exps/owod/s-owodb/order0/prob/stage_0 \
+  --gpus 0,1 --nproc-per-node 2
 ```
 
 Available method names are `vanilla_d_detr`, `ore_star`, `ow_detr`, `prob`, and
