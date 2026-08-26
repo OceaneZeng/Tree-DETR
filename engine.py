@@ -197,7 +197,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats['PQ_th'] = panoptic_res["Things"]
         stats['PQ_st'] = panoptic_res["Stuff"]
     if owod_known_class_ids is not None:
-        if is_dist_avail_and_initialized():
+        if utils.is_dist_avail_and_initialized():
             gathered_predictions = [None for _ in range(utils.get_world_size())]
             gathered_targets = [None for _ in range(utils.get_world_size())]
             torch.distributed.all_gather_object(gathered_predictions, owod_predictions)
