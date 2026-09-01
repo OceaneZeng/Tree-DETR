@@ -168,9 +168,13 @@ def expand_classification_head(model: nn.Module, new_num_classes: int,
     return old_num_classes, new_num_classes
 
 
-def _row_mask(size: int, first_trainable: int, device: torch.device) -> torch.Tensor:
+def _row_mask(size: int, trainable_class_ids: Iterable[int], device: torch.device) -> torch.Tensor:
     mask = torch.zeros(size, device=device)
-    mask[first_trainable:] = 1.0
+    ids = torch.as_tensor(sorted({int(value) for value in trainable_class_ids}),
+                          dtype=torch.long, device=device)
+    ids = ids[(ids >= 0) & (ids < size)]
+    if ids.numel():
+        mask[ids] = 1.0
     return mask
 
 
@@ -197,7 +201,48 @@ def freeze_for_increment(model: nn.Module, old_num_classes: int) -> Tuple[List, 
         seen.add(id(head))
         if old_num_classes >= head.out_features:
             raise ValueError("Classifier has no appended rows to train")
-        row_mask = _row_mask(head.out_features, old_num_classes, head.weight.device)
+        row_mask = _row_mask(head.out_features, range(old_num_classes, head.out_features),
+                             head.weight.device)
+        head.weight.requires_grad_(True)
+        handles.append(head.weight.register_hook(lambda grad, m=row_mask: grad * m[:, None]))
+        trainable.append(head.weight)
+        if head.bias is not None:
+            head.bias.requires_grad_(True)
+            handles.append(head.bias.register_hook(lambda grad, m=row_mask: grad * m))
+            trainable.append(head.bias)
+    return handles, trainable
+
+
+def freeze_for_class_ids(model: nn.Module, trainable_class_ids: Iterable[int]
+                         ) -> Tuple[List, List[nn.Parameter]]:
+    """Freeze detector weights and expose only selected classifier rows.
+
+    COCO/M-OWODB keeps the original category IDs (including gaps), so an
+    increment cannot be represented by a contiguous ``old_num_classes``
+    boundary.  This helper is the row-mask equivalent for arbitrary IDs.
+    LoRA factors, when attached, remain trainable as the shared adaptation
+    path.
+    """
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+
+    trainable: List[nn.Parameter] = []
+    for module in iter_lora_modules(model):
+        module.lora_a.requires_grad_(True)
+        module.lora_b.requires_grad_(True)
+        trainable.extend([module.lora_a, module.lora_b])
+
+    handles = []
+    seen = set()
+    requested = {int(value) for value in trainable_class_ids}
+    for head in _detector(model).class_embed:
+        if id(head) in seen:
+            continue
+        seen.add(id(head))
+        valid = requested & set(range(head.out_features))
+        if not valid:
+            raise ValueError("No requested classifier IDs fit this head")
+        row_mask = _row_mask(head.out_features, valid, head.weight.device)
         head.weight.requires_grad_(True)
         handles.append(head.weight.register_hook(lambda grad, m=row_mask: grad * m[:, None]))
         trainable.append(head.weight)

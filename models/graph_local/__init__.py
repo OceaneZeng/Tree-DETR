@@ -18,6 +18,7 @@ from .gnn import (
 from .lora import (
     LoRALinear,
     expand_classification_head,
+    freeze_for_class_ids,
     freeze_for_increment,
     inject_decoder_lora,
     lora_delta_vector,
@@ -37,6 +38,7 @@ __all__ = [
     "compress_gradient_sketches",
     "evaluate_neighborhood",
     "expand_classification_head",
+    "freeze_for_class_ids",
     "freeze_for_increment",
     "fit_interference_gnn",
     "harm_prediction_loss",

@@ -1,0 +1,287 @@
+#!/usr/bin/env python
+"""Run graph-local replay for one M-OWODB/S-OWODB OWOD stage.
+
+The graph is a class-level controller around the detector.  It reads the
+previous checkpoint's classifier prototypes, scores directed new-to-old
+interference edges, and turns the selected old classes into a replay
+annotation.  The actual detector training/evaluation is delegated to
+``main.py`` so the standard OWOD objectness and full-label metrics are kept.
+
+Use ``--graph-estimator cosine`` for the first stage.  A later stage may use
+``--graph-estimator gnn`` with a GNN trained only from earlier ``gnn_stage.pt``
+artifacts via ``tools/graph_local/train_gnn.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import subprocess
+import sys
+from pathlib import Path
+from typing import Mapping
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from models.graph_local.gnn import (compress_gradient_sketches,
+                                    load_gnn_checkpoint,
+                                    select_gnn_neighbors)
+from models.graph_local.interference import (build_conflict_matrix,
+                                             select_positive_neighbors)
+from models.graph_local.replay import build_increment_annotation
+
+
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Mapping) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+                    encoding="utf-8")
+
+
+def get_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--coco-path", required=True, type=Path)
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--stage", required=True, type=int)
+    parser.add_argument("--checkpoint", required=True, type=Path,
+                        help="previous stage detector checkpoint, or COCO pretrained checkpoint for stage 0")
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--owod-baseline", default="vanilla_d_detr")
+    parser.add_argument("--num-classes", default=91, type=int)
+    parser.add_argument("--epochs", default=20, type=int)
+    parser.add_argument("--batch-size", default=2, type=int)
+    parser.add_argument("--num-workers", default=4, type=int)
+    parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--gpus", default="0,1")
+    parser.add_argument("--nproc-per-node", default=2, type=int)
+    parser.add_argument("--master-port", default=29561, type=int)
+    parser.add_argument("--graph-estimator", choices=("cosine", "gnn"), default="cosine")
+    parser.add_argument("--gnn-checkpoint", default="", type=Path)
+    parser.add_argument("--graph-k", default=5, type=int)
+    parser.add_argument("--gnn-min-score", default=0.0, type=float)
+    parser.add_argument("--replay-budget", default=256, type=int)
+    parser.add_argument("--control", choices=("graph", "random", "global"), default="graph")
+    parser.add_argument("--eval-interval", default=5, type=int)
+    parser.add_argument("--lr-drop", default=15, type=int)
+    parser.add_argument("--unknown-threshold", default=0.5, type=float)
+    parser.add_argument("--lightweight", action="store_true")
+    parser.add_argument("--no-random-crop", action="store_true")
+    parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def load_state(path: Path) -> Mapping[str, torch.Tensor]:
+    # Older project checkpoints contain an argparse.Namespace alongside the
+    # tensors; allow that harmless metadata while still using weights_only.
+    with torch.serialization.safe_globals([argparse.Namespace]):
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    state = payload.get("model", payload) if isinstance(payload, Mapping) else payload
+    if not isinstance(state, Mapping):
+        raise ValueError(f"checkpoint is not a state dict: {path}")
+    return state
+
+
+def classifier_features(checkpoint: Path, class_ids: list[int]) -> dict[int, torch.Tensor]:
+    state = load_state(checkpoint)
+    key = next((name for name in state
+                if name.endswith("class_embed.0.weight")), None)
+    if key is None:
+        raise KeyError("checkpoint has no class_embed.0.weight; cannot build class graph")
+    weights = state[key].float()
+    if max(class_ids) >= weights.shape[0]:
+        raise ValueError(f"checkpoint classifier has {weights.shape[0]} rows, needs {max(class_ids) + 1}")
+    return {class_id: weights[class_id].reshape(-1).cpu() for class_id in class_ids}
+
+
+def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int],
+                     old_ids: list[int]) -> tuple[list[int], dict]:
+    if not old_ids or not new_ids or args.control == "global":
+        return (list(old_ids) if args.control == "global" else []), {"estimator": "none"}
+    class_ids, conflict = build_conflict_matrix(features)
+    selected: set[int] = set()
+    scores: dict[str, list] = {}
+    if args.graph_estimator == "cosine":
+        for source in new_ids:
+            ranked = select_positive_neighbors(class_ids, conflict, source, args.graph_k, 0.0)
+            ranked = [(target, score) for target, score in ranked if target in set(old_ids)]
+            selected.update(target for target, _score in ranked)
+            scores[str(source)] = [[int(target), float(score)] for target, score in ranked]
+        return sorted(selected), {"estimator": "classifier_prototype_cosine", "scores": scores}
+    if not args.gnn_checkpoint:
+        raise ValueError("--gnn-checkpoint is required for --graph-estimator gnn")
+    gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
+    ordered, compressed = compress_gradient_sketches(features, output_dim=gnn.input_dim)
+    with torch.no_grad():
+        edge_prob = gnn(compressed)["edge_prob"]
+    for source in new_ids:
+        ranked = select_gnn_neighbors(ordered, edge_prob, source, args.graph_k, args.gnn_min_score)
+        ranked = [(target, score) for target, score in ranked if target in set(old_ids)]
+        selected.update(target for target, _score in ranked)
+        scores[str(source)] = [[int(target), float(score)] for target, score in ranked]
+    return sorted(selected), {"estimator": "trainable_class_interference_gnn",
+                              "checkpoint": str(args.gnn_checkpoint.resolve()),
+                              "metadata": metadata, "scores": scores}
+
+
+def random_neighbors(old_ids: list[int], graph_k: int, seed: int) -> list[int]:
+    rng = random.Random(seed)
+    return sorted(rng.sample(old_ids, min(len(old_ids), max(0, graph_k))))
+
+
+def stage_paths(manifest_path: Path, stage: int, coco_path: Path) -> tuple[dict, Path, Path, Path]:
+    manifest = read_json(manifest_path)
+    stages = manifest.get("stages", [])
+    if stage < 0 or stage >= len(stages):
+        raise ValueError(f"stage {stage} is outside manifest [0, {len(stages)})")
+    root = manifest_path.parent
+    record = stages[stage]
+    stage_dir = root / f"stage_{stage}"
+    current = stage_dir / "instances_increment_train2017.json"
+    if not current.is_file():
+        current = stage_dir / "instances_increment_only_train2017.json"
+    seen = stage_dir / "instances_train2017.json"
+    val = stage_dir / "instances_val2017_full.json"
+    if not val.is_file():
+        val = stage_dir / "instances_val2017.json"
+    if not val.is_file():
+        # IOD-style manifests may not materialize a full-label file.  The
+        # source COCO validation annotation is the correct OWOD fallback.
+        val = coco_path / "annotations" / "instances_val2017.json"
+    for path in (current, seen, val):
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest stage file is missing: {path}")
+    return manifest, current, seen, val
+
+
+def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
+                       active_ids: list[int], old_ids: list[int], reset_classifier: bool) -> list[str]:
+    main = [str(ROOT / "main.py"), "--coco_path", str(args.coco_path),
+            "--train-ann", str(train_ann), "--val-ann", str(val_ann),
+            "--output_dir", str(arm_dir), "--num_classes", str(args.num_classes),
+            "--epochs", str(args.epochs), "--batch_size", str(args.batch_size),
+            "--num_workers", str(args.num_workers), "--seed", str(args.seed),
+            "--device", "cuda", "--owod-baseline", args.owod_baseline,
+            "--owod-known-class-ids", *[str(value) for value in active_ids],
+            "--unknown-threshold", str(args.unknown_threshold),
+            "--eval_interval", str(args.eval_interval), "--lr_drop", str(args.lr_drop),
+            "--pretrained", str(args.checkpoint), "--log-file", str(arm_dir / "train.log")]
+    if reset_classifier:
+        main.append("--reset-classifier")
+    if args.lightweight:
+        main.append("--lightweight")
+    if args.no_random_crop:
+        main.append("--no-random-crop")
+    if args.skip_eval:
+        main.append("--skip-eval")
+    if args.stage > 0 and old_ids:
+        main += ["--teacher-completion", "--teacher-old-class-ids",
+                 *[str(value) for value in old_ids]]
+    if args.nproc_per_node > 1:
+        return [sys.executable, "-m", "torch.distributed.run", "--standalone",
+                "--nproc_per_node", str(args.nproc_per_node), "--master_port",
+                str(args.master_port)] + main
+    return [sys.executable] + main
+
+
+def stream_process(command: list[str], output_dir: Path, env: dict[str, str], dry_run: bool) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "command.txt").write_text(" ".join(command) + "\n", encoding="utf-8")
+    if dry_run:
+        print(" ".join(command))
+        return 0
+    console = output_dir / "console.log"
+    with console.open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, bufsize=1)
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            handle.write(line)
+            handle.flush()
+        return int(process.wait())
+
+
+def main() -> int:
+    args = get_parser().parse_args()
+    args.coco_path = args.coco_path.resolve()
+    args.manifest = args.manifest.resolve()
+    args.checkpoint = args.checkpoint.resolve()
+    args.output_dir = args.output_dir.resolve()
+    manifest, current_ann, seen_ann, full_val = stage_paths(args.manifest, args.stage,
+                                                            args.coco_path)
+    record = manifest["stages"][args.stage]
+    new_ids = [int(value) for value in record["classes"]]
+    active_ids = [int(value) for value in record["active_classes"]]
+    old_ids = [int(value) for value in manifest["category_order_source_ids"]
+               if int(value) in set(active_ids) - set(new_ids)]
+    if not args.checkpoint.is_file():
+        raise SystemExit(f"missing checkpoint: {args.checkpoint}")
+    all_ids = [int(value) for value in manifest["category_order_source_ids"]]
+    features = classifier_features(args.checkpoint, all_ids)
+    selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
+    if args.control == "random":
+        selected = random_neighbors(old_ids, args.graph_k * max(1, len(new_ids)), args.seed)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    annotation_dir = args.output_dir / "annotations"
+    if args.stage == 0 or not selected:
+        train_ann = current_ann if args.stage > 0 else seen_ann
+        replay_info = {"replay_classes": selected, "replay_images": 0,
+                       "total_images": len(read_json(train_ann).get("images", []))}
+    else:
+        train_ann = annotation_dir / f"train_{args.control}.json"
+        replay_info = build_increment_annotation(
+            current_ann, seen_ann, selected, args.replay_budget, train_ann, args.seed)
+
+    graph_class_ids, graph_features = compress_gradient_sketches(features, output_dim=128)
+    _, conflict = build_conflict_matrix(features)
+    harm = torch.zeros_like(conflict)
+    valid = torch.zeros_like(conflict, dtype=torch.bool)
+    index = {class_id: i for i, class_id in enumerate(graph_class_ids)}
+    for source in new_ids:
+        for target in old_ids:
+            harm[index[source], index[target]] = conflict[index[source], index[target]]
+            valid[index[source], index[target]] = True
+    torch.save({"schema_version": 2, "class_ids": graph_class_ids,
+                "features": graph_features, "harm": harm, "valid_mask": valid,
+                "source_classes": new_ids, "target_classes": old_ids},
+               args.output_dir / "gnn_stage.pt")
+    write_json(args.output_dir / "graph.json", {
+        "stage": args.stage, "new_classes": new_ids, "old_classes": old_ids,
+        "selected_replay_classes": selected, "graph": graph_info,
+        "replay": replay_info, "feature_source": "checkpoint classifier prototypes",
+    })
+
+    arm_dir = args.output_dir / args.control
+    command = build_main_command(args, train_ann, full_val, arm_dir, active_ids, old_ids,
+                                 args.stage == 0)
+    metadata = {"runner": "tools/owod/run_graph_local_increment.py", "stage": args.stage,
+                "new_classes": new_ids, "old_classes": old_ids,
+                "active_classes": active_ids, "selected_replay_classes": selected,
+                "graph_estimator": args.graph_estimator, "control": args.control,
+                "checkpoint": str(args.checkpoint), "command": command}
+    write_json(args.output_dir / "run_config.json", metadata)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "models" / "ops") + os.pathsep + env.get("PYTHONPATH", "")
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    if args.gpus:
+        env["CUDA_VISIBLE_DEVICES"] = args.gpus
+    code = stream_process(command, arm_dir, env, args.dry_run)
+    write_json(args.output_dir / "summary.json", {**metadata, "return_code": code,
+                "train_log": str((arm_dir / "train.log").resolve()),
+                "console_log": str((arm_dir / "console.log").resolve())})
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
