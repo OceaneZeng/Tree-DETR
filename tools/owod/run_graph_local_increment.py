@@ -83,8 +83,14 @@ def get_parser() -> argparse.ArgumentParser:
 def load_state(path: Path) -> Mapping[str, torch.Tensor]:
     # Older project checkpoints contain an argparse.Namespace alongside the
     # tensors; allow that harmless metadata while still using weights_only.
-    with torch.serialization.safe_globals([argparse.Namespace]):
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if safe_globals is None:
+        # PyTorch 2.4 has no safe_globals. This is an explicitly supplied
+        # local checkpoint, matching main.load_local_checkpoint behaviour.
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    else:
+        with safe_globals([argparse.Namespace]):
+            payload = torch.load(path, map_location="cpu", weights_only=True)
     state = payload.get("model", payload) if isinstance(payload, Mapping) else payload
     if not isinstance(state, Mapping):
         raise ValueError(f"checkpoint is not a state dict: {path}")
