@@ -184,6 +184,10 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--eval_interval", str(args.eval_interval), "--lr_drop", str(args.lr_drop),
             "--log-file", str(arm_dir / "train.log")]
     if args.resume:
+        # main.py loads --pretrained first to construct the frozen teacher,
+        # then --resume restores the current-stage detector/optimizer state.
+        if args.stage > 0 and old_ids:
+            main += ["--pretrained", str(args.checkpoint)]
         main += ["--resume", str(args.resume)]
     else:
         main += ["--pretrained", str(args.checkpoint)]
