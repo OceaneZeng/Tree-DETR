@@ -54,6 +54,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=True, type=int)
     parser.add_argument("--checkpoint", required=True, type=Path,
                         help="previous stage detector checkpoint, or COCO pretrained checkpoint for stage 0")
+    parser.add_argument("--resume", default="", type=Path,
+                        help="incomplete current-stage checkpoint; restores optimizer and epoch")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--owod-baseline", default="vanilla_d_detr")
     parser.add_argument("--num-classes", default=91, type=int)
@@ -180,8 +182,12 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--owod-known-class-ids", *[str(value) for value in active_ids],
             "--unknown-threshold", str(args.unknown_threshold),
             "--eval_interval", str(args.eval_interval), "--lr_drop", str(args.lr_drop),
-            "--pretrained", str(args.checkpoint), "--log-file", str(arm_dir / "train.log")]
-    if reset_classifier:
+            "--log-file", str(arm_dir / "train.log")]
+    if args.resume:
+        main += ["--resume", str(args.resume)]
+    else:
+        main += ["--pretrained", str(args.checkpoint)]
+    if reset_classifier and not args.resume:
         main.append("--reset-classifier")
     if args.lightweight:
         main.append("--lightweight")
@@ -222,6 +228,8 @@ def main() -> int:
     args.coco_path = args.coco_path.resolve()
     args.manifest = args.manifest.resolve()
     args.checkpoint = args.checkpoint.resolve()
+    if args.resume:
+        args.resume = args.resume.resolve()
     args.output_dir = args.output_dir.resolve()
     manifest, current_ann, seen_ann, full_val = stage_paths(args.manifest, args.stage,
                                                             args.coco_path)
@@ -232,6 +240,8 @@ def main() -> int:
                if int(value) in set(active_ids) - set(new_ids)]
     if not args.checkpoint.is_file():
         raise SystemExit(f"missing checkpoint: {args.checkpoint}")
+    if args.resume and not args.resume.is_file():
+        raise SystemExit(f"missing resume checkpoint: {args.resume}")
     all_ids = [int(value) for value in manifest["category_order_source_ids"]]
     features = classifier_features(args.checkpoint, all_ids)
     selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
@@ -275,7 +285,9 @@ def main() -> int:
                 "new_classes": new_ids, "old_classes": old_ids,
                 "active_classes": active_ids, "selected_replay_classes": selected,
                 "graph_estimator": args.graph_estimator, "control": args.control,
-                "checkpoint": str(args.checkpoint), "command": command}
+                "checkpoint": str(args.checkpoint),
+                "resume": str(args.resume) if args.resume else "",
+                "command": command}
     write_json(args.output_dir / "run_config.json", metadata)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "models" / "ops") + os.pathsep + env.get("PYTHONPATH", "")

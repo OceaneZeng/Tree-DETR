@@ -77,3 +77,6 @@ python tools/graph_local/train_gnn.py \
 Pass `--graph-estimator gnn --gnn-checkpoint ...` to the stage 2 command and
 use the stage 1 detector checkpoint. The runner creates per-arm `train.log`
 and `console.log`; create the parent directory before an external `tee`.
+To continue an interrupted arm, keep the same output directory and add
+`--resume "$OUT/graph/checkpoint0004.pth"` (or the latest saved checkpoint),
+while leaving `--checkpoint` pointed at the previous completed stage.
