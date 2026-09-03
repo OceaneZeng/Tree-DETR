@@ -79,6 +79,10 @@ def get_args_parser():
                         help='Loss coefficient for OW-DETR/PROB foreground objectness')
     parser.add_argument('--owod-known-class-ids', type=int, nargs='+', default=None,
                         help='Known category IDs for U-Recall/A-OSE/WI evaluation on full labels')
+    parser.add_argument('--owod-previous-class-ids', type=int, nargs='+', default=None,
+                        help='Previously learned category IDs for OWOD Previous AP50')
+    parser.add_argument('--owod-current-class-ids', type=int, nargs='+', default=None,
+                        help='Current-stage category IDs for OWOD Current AP50')
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -376,7 +380,18 @@ def main(args):
             for pg, pg_old in zip(optimizer.param_groups, p_groups):
                 pg['lr'] = pg_old['lr']
                 pg['initial_lr'] = pg_old['initial_lr']
-            print(optimizer.param_groups)
+            optimizer_summary = [
+                {
+                    'group': index,
+                    'lr': group.get('lr'),
+                    'initial_lr': group.get('initial_lr'),
+                    'weight_decay': group.get('weight_decay'),
+                    'parameter_tensors': len(group.get('params', [])),
+                    'parameters': sum(parameter.numel() for parameter in group.get('params', [])),
+                }
+                for index, group in enumerate(optimizer.param_groups)
+            ]
+            print('Restored optimizer groups:', optimizer_summary)
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
             args.override_resumed_lr_drop = True
@@ -392,13 +407,17 @@ def main(args):
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir,
                 owod_known_class_ids=args.owod_known_class_ids,
                 owod_unknown_threshold=args.unknown_threshold,
+                owod_previous_class_ids=args.owod_previous_class_ids,
+                owod_current_class_ids=args.owod_current_class_ids,
             )
     
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir,
                                               owod_known_class_ids=args.owod_known_class_ids,
-                                              owod_unknown_threshold=args.unknown_threshold)
+                                              owod_unknown_threshold=args.unknown_threshold,
+                                              owod_previous_class_ids=args.owod_previous_class_ids,
+                                              owod_current_class_ids=args.owod_current_class_ids)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         stop_file_logging(file_log_state)
@@ -441,6 +460,8 @@ def main(args):
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir,
                 owod_known_class_ids=args.owod_known_class_ids,
                 owod_unknown_threshold=args.unknown_threshold,
+                owod_previous_class_ids=args.owod_previous_class_ids,
+                owod_current_class_ids=args.owod_current_class_ids,
             )
         else:
             test_stats, coco_evaluator = {}, None

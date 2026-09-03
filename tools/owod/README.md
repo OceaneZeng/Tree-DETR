@@ -49,7 +49,10 @@ Run one increment from an earlier detector checkpoint with the graph-local
 replay controller. The first increment uses a deterministic cosine graph over
 the checkpoint classifier prototypes; selected old classes become a balanced
 replay set. Full-label validation keeps the normal COCO AP and OWOD metrics in
-the detector log.
+the detector log. ``--graph-k`` is the total stage-level replay neighborhood:
+each old class receives its maximum risk score over all new classes, and the
+top-k old classes are selected. ``graph.json`` records the complete per-source
+and aggregated rankings for auditability.
 
 ```bash
 OUT="$PWD/exps/owod/m-owodb/order0/graph_local/stage_1_cosine"

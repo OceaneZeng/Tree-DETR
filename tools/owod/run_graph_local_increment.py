@@ -29,11 +29,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.graph_local.gnn import (compress_gradient_sketches,
-                                    load_gnn_checkpoint,
-                                    select_gnn_neighbors)
-from models.graph_local.interference import (build_conflict_matrix,
-                                             select_positive_neighbors)
+from models.graph_local.gnn import compress_gradient_sketches, load_gnn_checkpoint
+from models.graph_local.interference import build_conflict_matrix
 from models.graph_local.replay import build_increment_annotation
 
 
@@ -111,34 +108,75 @@ def classifier_features(checkpoint: Path, class_ids: list[int]) -> dict[int, tor
     return {class_id: weights[class_id].reshape(-1).cpu() for class_id in class_ids}
 
 
+def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
+                           new_ids: list[int], old_ids: list[int], k: int,
+                           min_score: float = 0.0) -> tuple[list[int], dict]:
+    """Select a stage-level top-k over old classes only.
+
+    A target's risk is the maximum directed edge from any current-stage class.
+    This treats ``k`` as the total replay neighborhood size, rather than taking
+    k neighbors from all classes for each source and filtering afterwards.
+    """
+    if edge_scores.ndim != 2 or edge_scores.shape[0] != edge_scores.shape[1]:
+        raise ValueError("edge_scores must be a square matrix")
+    if len(class_ids) != edge_scores.shape[0]:
+        raise ValueError("class_ids and edge_scores must have matching lengths")
+
+    index = {int(class_id): position for position, class_id in enumerate(class_ids)}
+    missing = sorted((set(new_ids) | set(old_ids)) - set(index))
+    if missing:
+        raise KeyError(f"Graph scores are missing classes: {missing}")
+
+    target_ids = list(dict.fromkeys(int(class_id) for class_id in old_ids))
+    source_scores: dict[str, list[list[float | int]]] = {}
+    aggregate = {target: float("-inf") for target in target_ids}
+    detached = edge_scores.detach().float().cpu()
+    for source in new_ids:
+        ranked = []
+        for target in target_ids:
+            score = float(detached[index[int(source)], index[target]])
+            aggregate[target] = max(aggregate[target], score)
+            ranked.append([target, score])
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        source_scores[str(int(source))] = ranked
+
+    aggregate_ranking = sorted(
+        ([target, score] for target, score in aggregate.items() if score > min_score),
+        key=lambda item: (-item[1], item[0]),
+    )
+    selected = [int(target) for target, _score in aggregate_ranking[:max(0, int(k))]]
+    return selected, {
+        "selection_scope": "stage_top_k_old_classes",
+        "aggregation": "max_over_new_classes",
+        "requested_k": int(k),
+        "selected_k": len(selected),
+        "min_score": float(min_score),
+        "candidate_old_classes": target_ids,
+        "aggregated_scores": aggregate_ranking,
+        "scores": source_scores,
+    }
+
+
 def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int],
                      old_ids: list[int]) -> tuple[list[int], dict]:
     if not old_ids or not new_ids or args.control == "global":
         return (list(old_ids) if args.control == "global" else []), {"estimator": "none"}
     class_ids, conflict = build_conflict_matrix(features)
-    selected: set[int] = set()
-    scores: dict[str, list] = {}
     if args.graph_estimator == "cosine":
-        for source in new_ids:
-            ranked = select_positive_neighbors(class_ids, conflict, source, args.graph_k, 0.0)
-            ranked = [(target, score) for target, score in ranked if target in set(old_ids)]
-            selected.update(target for target, _score in ranked)
-            scores[str(source)] = [[int(target), float(score)] for target, score in ranked]
-        return sorted(selected), {"estimator": "classifier_prototype_cosine", "scores": scores}
+        selected, details = rank_stage_old_classes(
+            class_ids, conflict, new_ids, old_ids, args.graph_k, 0.0)
+        return selected, {"estimator": "classifier_prototype_cosine", **details}
     if not args.gnn_checkpoint:
         raise ValueError("--gnn-checkpoint is required for --graph-estimator gnn")
     gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
     ordered, compressed = compress_gradient_sketches(features, output_dim=gnn.input_dim)
     with torch.no_grad():
         edge_prob = gnn(compressed)["edge_prob"]
-    for source in new_ids:
-        ranked = select_gnn_neighbors(ordered, edge_prob, source, args.graph_k, args.gnn_min_score)
-        ranked = [(target, score) for target, score in ranked if target in set(old_ids)]
-        selected.update(target for target, _score in ranked)
-        scores[str(source)] = [[int(target), float(score)] for target, score in ranked]
-    return sorted(selected), {"estimator": "trainable_class_interference_gnn",
-                              "checkpoint": str(args.gnn_checkpoint.resolve()),
-                              "metadata": metadata, "scores": scores}
+    selected, details = rank_stage_old_classes(
+        ordered, edge_prob, new_ids, old_ids, args.graph_k, args.gnn_min_score)
+    return selected, {"estimator": "trainable_class_interference_gnn",
+                      "checkpoint": str(args.gnn_checkpoint.resolve()),
+                      "metadata": metadata, **details}
 
 
 def random_neighbors(old_ids: list[int], graph_k: int, seed: int) -> list[int]:
@@ -180,9 +218,12 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--num_workers", str(args.num_workers), "--seed", str(args.seed),
             "--device", "cuda", "--owod-baseline", args.owod_baseline,
             "--owod-known-class-ids", *[str(value) for value in active_ids],
+            "--owod-current-class-ids", *[str(value) for value in active_ids if value not in set(old_ids)],
             "--unknown-threshold", str(args.unknown_threshold),
             "--eval_interval", str(args.eval_interval), "--lr_drop", str(args.lr_drop),
             "--log-file", str(arm_dir / "train.log")]
+    if old_ids:
+        main += ["--owod-previous-class-ids", *[str(value) for value in old_ids]]
     if args.resume:
         # main.py loads --pretrained first to construct the frozen teacher,
         # then --resume restores the current-stage detector/optimizer state.
@@ -246,41 +287,57 @@ def main() -> int:
         raise SystemExit(f"missing checkpoint: {args.checkpoint}")
     if args.resume and not args.resume.is_file():
         raise SystemExit(f"missing resume checkpoint: {args.resume}")
-    all_ids = [int(value) for value in manifest["category_order_source_ids"]]
-    features = classifier_features(args.checkpoint, all_ids)
-    selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
-    if args.control == "random":
-        selected = random_neighbors(old_ids, args.graph_k * max(1, len(new_ids)), args.seed)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     annotation_dir = args.output_dir / "annotations"
-    if args.stage == 0 or not selected:
-        train_ann = current_ann if args.stage > 0 else seen_ann
-        replay_info = {"replay_classes": selected, "replay_images": 0,
-                       "total_images": len(read_json(train_ann).get("images", []))}
-    else:
+    graph_path = args.output_dir / "graph.json"
+    if args.resume:
         train_ann = annotation_dir / f"train_{args.control}.json"
-        replay_info = build_increment_annotation(
-            current_ann, seen_ann, selected, args.replay_budget, train_ann, args.seed)
+        if args.stage == 0:
+            train_ann = seen_ann
+        if not graph_path.is_file() or not train_ann.is_file():
+            raise SystemExit(
+                "resume requires the original graph.json and training annotation; "
+                f"missing one of: {graph_path}, {train_ann}")
+        saved_graph = read_json(graph_path)
+        selected = [int(value) for value in saved_graph.get("selected_replay_classes", [])]
+        graph_info = saved_graph.get("graph", {})
+        replay_info = saved_graph.get("replay", {})
+        print(f"Resume fast path: reusing {graph_path}", flush=True)
+        print(f"Resume fast path: reusing {train_ann}", flush=True)
+    else:
+        all_ids = [int(value) for value in manifest["category_order_source_ids"]]
+        print(f"Loading graph features from {args.checkpoint}", flush=True)
+        features = classifier_features(args.checkpoint, all_ids)
+        selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
+        if args.control == "random":
+            selected = random_neighbors(old_ids, len(selected), args.seed)
+        if args.stage == 0 or not selected:
+            train_ann = current_ann if args.stage > 0 else seen_ann
+            replay_info = {"replay_classes": selected, "replay_images": 0,
+                           "total_images": len(read_json(train_ann).get("images", []))}
+        else:
+            train_ann = annotation_dir / f"train_{args.control}.json"
+            replay_info = build_increment_annotation(
+                current_ann, seen_ann, selected, args.replay_budget, train_ann, args.seed)
 
-    graph_class_ids, graph_features = compress_gradient_sketches(features, output_dim=128)
-    _, conflict = build_conflict_matrix(features)
-    harm = torch.zeros_like(conflict)
-    valid = torch.zeros_like(conflict, dtype=torch.bool)
-    index = {class_id: i for i, class_id in enumerate(graph_class_ids)}
-    for source in new_ids:
-        for target in old_ids:
-            harm[index[source], index[target]] = conflict[index[source], index[target]]
-            valid[index[source], index[target]] = True
-    torch.save({"schema_version": 2, "class_ids": graph_class_ids,
-                "features": graph_features, "harm": harm, "valid_mask": valid,
-                "source_classes": new_ids, "target_classes": old_ids},
-               args.output_dir / "gnn_stage.pt")
-    write_json(args.output_dir / "graph.json", {
-        "stage": args.stage, "new_classes": new_ids, "old_classes": old_ids,
-        "selected_replay_classes": selected, "graph": graph_info,
-        "replay": replay_info, "feature_source": "checkpoint classifier prototypes",
-    })
+        graph_class_ids, graph_features = compress_gradient_sketches(features, output_dim=128)
+        _, conflict = build_conflict_matrix(features)
+        harm = torch.zeros_like(conflict)
+        valid = torch.zeros_like(conflict, dtype=torch.bool)
+        index = {class_id: i for i, class_id in enumerate(graph_class_ids)}
+        for source in new_ids:
+            for target in old_ids:
+                harm[index[source], index[target]] = conflict[index[source], index[target]]
+                valid[index[source], index[target]] = True
+        torch.save({"schema_version": 2, "class_ids": graph_class_ids,
+                    "features": graph_features, "harm": harm, "valid_mask": valid,
+                    "source_classes": new_ids, "target_classes": old_ids},
+                   args.output_dir / "gnn_stage.pt")
+        write_json(graph_path, {
+            "stage": args.stage, "new_classes": new_ids, "old_classes": old_ids,
+            "selected_replay_classes": selected, "graph": graph_info,
+            "replay": replay_info, "feature_source": "checkpoint classifier prototypes",
+        })
 
     arm_dir = args.output_dir / args.control
     command = build_main_command(args, train_ann, full_val, arm_dir, active_ids, old_ids,

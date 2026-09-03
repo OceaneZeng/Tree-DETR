@@ -96,6 +96,10 @@ def build_command(args: argparse.Namespace) -> list[str]:
         command.append("--reset-classifier")
     if getattr(args, "known_class_ids", None):
         command += ["--owod-known-class-ids"] + [str(value) for value in args.known_class_ids]
+    if getattr(args, "previous_class_ids", None):
+        command += ["--owod-previous-class-ids"] + [str(value) for value in args.previous_class_ids]
+    if getattr(args, "current_class_ids", None):
+        command += ["--owod-current-class-ids"] + [str(value) for value in args.current_class_ids]
     for item in args.extra_main_arg:
         command.append(item)
     return command
@@ -128,6 +132,10 @@ def main() -> int:
         raise SystemExit(f"missing OWOD manifest: {args.manifest}")
     stage_metadata = _read_stage_metadata(args.manifest, args.stage)
     args.known_class_ids = stage_metadata.get("stage", {}).get("active_classes", [])
+    args.current_class_ids = stage_metadata.get("stage", {}).get("classes", [])
+    current = set(args.current_class_ids)
+    args.previous_class_ids = [class_id for class_id in args.known_class_ids
+                               if class_id not in current]
     command = build_command(args)
     write_run_metadata(args, command, stage_metadata)
     print(f"OWOD baseline: {args.method}")

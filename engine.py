@@ -15,6 +15,7 @@ import os
 import sys
 from typing import Iterable
 
+import numpy as np
 import torch
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
@@ -102,9 +103,29 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+def _coco_ap50_for_categories(coco_eval, category_ids) -> float:
+    """Return COCO-style AP50 for a category subset, in the usual [0, 1] scale."""
+    requested = {int(class_id) for class_id in category_ids or []}
+    if not requested or not coco_eval.eval:
+        return float("nan")
+    params = coco_eval.params
+    category_indices = [index for index, class_id in enumerate(params.catIds)
+                        if int(class_id) in requested]
+    iou_indices = np.flatnonzero(np.isclose(params.iouThrs, 0.5))
+    if not category_indices or not iou_indices.size:
+        return float("nan")
+    area_index = list(params.areaRngLbl).index("all")
+    max_dets_index = list(params.maxDets).index(100)
+    precision = coco_eval.eval["precision"][
+        int(iou_indices[0]), :, category_indices, area_index, max_dets_index]
+    valid = precision[precision > -1]
+    return float(valid.mean()) if valid.size else float("nan")
+
+
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir,
-             owod_known_class_ids=None, owod_unknown_threshold=0.5):
+             owod_known_class_ids=None, owod_unknown_threshold=0.5,
+             owod_previous_class_ids=None, owod_current_class_ids=None):
     model.eval()
     criterion.eval()
 
@@ -190,6 +211,18 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     if coco_evaluator is not None:
         if 'bbox' in postprocessors.keys():
             stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
+            bbox_eval = coco_evaluator.coco_eval['bbox']
+            class_ap50 = {
+                'Previous': _coco_ap50_for_categories(bbox_eval, owod_previous_class_ids),
+                'Current': _coco_ap50_for_categories(bbox_eval, owod_current_class_ids),
+                'Known': _coco_ap50_for_categories(bbox_eval, owod_known_class_ids),
+            }
+            class_ap50 = {key: value for key, value in class_ap50.items()
+                          if not math.isnan(value)}
+            if class_ap50:
+                stats.update({f'owod_{key.lower()}_ap50': value
+                              for key, value in class_ap50.items()})
+                print("OWOD class AP50:", class_ap50)
         if 'segm' in postprocessors.keys():
             stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
     if panoptic_res is not None:
