@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Mapping
 
 import torch
+import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -108,6 +109,24 @@ def classifier_features(checkpoint: Path, class_ids: list[int]) -> dict[int, tor
     return {class_id: weights[class_id].reshape(-1).cpu() for class_id in class_ids}
 
 
+def build_prototype_similarity_matrix(features: dict[int, torch.Tensor]
+                                      ) -> tuple[list[int], torch.Tensor]:
+    """Return positive cosine similarity for classifier prototypes.
+
+    Classifier weights are class prototypes, not gradient sketches. Similar
+    prototype directions indicate greater confusion risk; negative cosine is
+    reserved for actual gradient-conflict measurements.
+    """
+    if len(features) < 2:
+        raise ValueError("At least two class prototypes are required")
+    class_ids = sorted(int(class_id) for class_id in features)
+    rows = torch.stack([features[class_id].float().cpu() for class_id in class_ids])
+    rows = F.normalize(rows, dim=1, eps=1e-12)
+    similarity = torch.clamp(rows @ rows.t(), min=0.0)
+    similarity.fill_diagonal_(0.0)
+    return class_ids, similarity
+
+
 def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
                            new_ids: list[int], old_ids: list[int], k: int,
                            min_score: float = 0.0) -> tuple[list[int], dict]:
@@ -161,11 +180,15 @@ def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int]
                      old_ids: list[int]) -> tuple[list[int], dict]:
     if not old_ids or not new_ids or args.control == "global":
         return (list(old_ids) if args.control == "global" else []), {"estimator": "none"}
-    class_ids, conflict = build_conflict_matrix(features)
     if args.graph_estimator == "cosine":
+        class_ids, similarity = build_prototype_similarity_matrix(features)
         selected, details = rank_stage_old_classes(
-            class_ids, conflict, new_ids, old_ids, args.graph_k, 0.0)
-        return selected, {"estimator": "classifier_prototype_cosine", **details}
+            class_ids, similarity, new_ids, old_ids, args.graph_k, 0.0)
+        return selected, {
+            "estimator": "classifier_prototype_cosine_similarity",
+            "score_semantics": "max_positive_cosine_similarity",
+            **details,
+        }
     if not args.gnn_checkpoint:
         raise ValueError("--gnn-checkpoint is required for --graph-estimator gnn")
     gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")

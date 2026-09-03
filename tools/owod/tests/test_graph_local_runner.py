@@ -4,7 +4,8 @@ import numpy as np
 import torch
 
 from engine import _coco_ap50_for_categories
-from tools.owod.run_graph_local_increment import (random_neighbors,
+from tools.owod.run_graph_local_increment import (build_prototype_similarity_matrix,
+                                                   random_neighbors,
                                                    get_parser,
                                                    rank_stage_old_classes,
                                                    select_neighbors)
@@ -32,10 +33,10 @@ def test_cosine_selection_ranks_old_targets_before_top_k():
     # The strongest per-source neighbor is another new class. The old bug took
     # top-k first and then discarded that new class, returning no replay class.
     features = {
-        1: torch.tensor([-0.8, -0.6]),
-        2: torch.tensor([-0.6, -0.8]),
+        1: torch.tensor([0.8, 0.6]),
+        2: torch.tensor([0.0, 1.0]),
         10: torch.tensor([1.0, 0.0]),
-        11: torch.tensor([-1.0, 0.0]),
+        11: torch.tensor([0.99, 0.1]),
     }
     args = SimpleNamespace(control="graph", graph_estimator="cosine", graph_k=1)
 
@@ -44,6 +45,17 @@ def test_cosine_selection_ranks_old_targets_before_top_k():
     assert selected == [1]
     assert details["requested_k"] == 1
     assert details["selected_k"] == 1
+
+
+def test_prototype_graph_uses_positive_similarity_not_negative_gradient_conflict():
+    class_ids, scores = build_prototype_similarity_matrix({
+        1: torch.tensor([1.0, 0.0]),
+        2: torch.tensor([0.8, 0.6]),
+        3: torch.tensor([-1.0, 0.0]),
+    })
+    index = {class_id: position for position, class_id in enumerate(class_ids)}
+    assert torch.isclose(scores[index[1], index[2]], torch.tensor(0.8))
+    assert scores[index[1], index[3]] == 0.0
 
 
 def test_random_control_can_match_graph_neighborhood_size():
