@@ -51,7 +51,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=True, type=int)
     parser.add_argument("--checkpoint", required=True, type=Path,
                         help="previous stage detector checkpoint, or COCO pretrained checkpoint for stage 0")
-    parser.add_argument("--resume", default="", type=Path,
+    parser.add_argument("--resume", default=None, type=Path,
                         help="incomplete current-stage checkpoint; restores optimizer and epoch")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--owod-baseline", default="vanilla_d_detr")

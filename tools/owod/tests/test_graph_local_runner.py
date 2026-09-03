@@ -5,6 +5,7 @@ import torch
 
 from engine import _coco_ap50_for_categories
 from tools.owod.run_graph_local_increment import (random_neighbors,
+                                                   get_parser,
                                                    rank_stage_old_classes,
                                                    select_neighbors)
 
@@ -49,6 +50,18 @@ def test_random_control_can_match_graph_neighborhood_size():
     selected = random_neighbors([1, 2, 3, 4], graph_k=3, seed=42)
     assert len(selected) == 3
     assert set(selected).issubset({1, 2, 3, 4})
+
+
+def test_resume_defaults_to_none_instead_of_current_directory():
+    parser = get_parser()
+    args = parser.parse_args([
+        "--coco-path", "coco",
+        "--manifest", "manifest.json",
+        "--stage", "1",
+        "--checkpoint", "checkpoint.pth",
+        "--output-dir", "output",
+    ])
+    assert args.resume is None
 
 
 def test_category_ap50_uses_requested_category_subset():
