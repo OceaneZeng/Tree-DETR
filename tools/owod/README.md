@@ -181,3 +181,31 @@ Evaluation prints `OWOD Table 1 (%)` in percentage points. A displayed value of
 `53.1` corresponds to a raw metric of `0.531`; these are not different scores.
 U-Rec and H-Score are omitted at Task 4 when no unknown ground truth remains.
 A-OSE, WI, UDR, and UDP remain diagnostic metrics outside the main DEUS table.
+
+## 8. Audit a server workspace
+
+Source cleanup on a development machine does not inspect experiments generated
+on the training server. Run the server audit from the repository root before
+removing old artifacts:
+
+```bash
+python tools/owod/audit_server_workspace.py \
+  --project-root "$PWD" \
+  --report-json "$PWD/server_cleanup_report.json"
+```
+
+The default is a read-only dry run. The report separates completed experiments,
+interrupted checkpoints, periodic checkpoints, large logs, and safe deletion
+candidates. To remove only rebuildable Python/build caches and logs whose bytes
+and SHA-256 hash exactly match the canonical `train.log`, run:
+
+```bash
+python tools/owod/audit_server_workspace.py \
+  --project-root "$PWD" \
+  --report-json "$PWD/server_cleanup_report_after.json" \
+  --apply-safe
+```
+
+This command never deletes datasets, pretrained weights, GNN checkpoints,
+detector checkpoints, completed experiments, or nonidentical logs. Items under
+`review_only` require an explicit manual decision.
