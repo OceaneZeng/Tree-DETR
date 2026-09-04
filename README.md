@@ -1,5 +1,27 @@
 # Deformable DETR
 
+## Current OWOD-GNN workflow
+
+The active research path extends Deformable DETR for open-world object
+detection (OWOD) with an empirically supervised class-interference GNN. The GNN
+ranks previous classes by predicted interference from the current task, and the
+detector uses the selected local neighborhood for replay. Cosine similarity is
+kept only as an ablation.
+
+The primary entry points are:
+
+- `tools/owod/build_protocol.py`: build S-OWODB or M-OWODB stage annotations.
+- `tools/owod/run_baseline.py`: train and evaluate external OWOD baselines.
+- `tools/owod/calibrate_interference_gnn.py`: train the interference GNN from
+  measured detector harm on an earlier stage.
+- `tools/owod/run_graph_local_increment.py`: run GNN-selected incremental
+  replay and detector training.
+
+See [`tools/owod/README.md`](tools/owod/README.md) for reproducible commands.
+Each detector experiment keeps `train.log`, `metrics.jsonl`, `run_config.json`,
+and `run_history/` beside its checkpoints. A fresh run archives stale logs;
+only `--resume` appends to an existing run.
+
 By [Xizhou Zhu](https://scholar.google.com/citations?user=02RXI00AAAAJ),  [Weijie Su](https://www.weijiesu.com/),  [Lewei Lu](https://www.linkedin.com/in/lewei-lu-94015977/), [Bin Li](http://staff.ustc.edu.cn/~binli/), [Xiaogang Wang](http://www.ee.cuhk.edu.hk/~xgwang/), [Jifeng Dai](https://jifengdai.org/).
 
 This repository is an official implementation of the paper [Deformable DETR: Deformable Transformers for End-to-End Object Detection](https://arxiv.org/abs/2010.04159).

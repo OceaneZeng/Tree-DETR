@@ -33,22 +33,24 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     teacher_score_threshold: float = 0.5,
                     teacher_duplicate_iou: float = 0.7,
                     teacher_ground_truth_iou: float = 0.5,
-                    teacher_max_per_image: int = 20):
+                    teacher_max_per_image: int = 20,
+                    print_freq: int = 100):
     model.train()
     criterion.train()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(
+        delimiter="  ",
+        visible_meters={"lr", "class_error", "grad_norm", "loss", "loss_ce",
+                        "loss_bbox", "loss_giou", "loss_objectness", "pseudo_labels"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
-
     prefetcher = data_prefetcher(data_loader, device, prefetch=True)
     samples, targets = prefetcher.next()
     pseudo_total = 0
 
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-    for _ in metric_logger.log_every(range(len(data_loader)), print_freq, header):
+    for _ in metric_logger.log_every(range(len(data_loader)), max(1, int(print_freq)), header):
         if teacher is not None:
             targets, pseudo_counts = complete_targets_with_teacher(
                 teacher,
@@ -125,11 +127,15 @@ def _coco_ap50_for_categories(coco_eval, category_ids) -> float:
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir,
              owod_known_class_ids=None, owod_unknown_threshold=0.5,
-             owod_previous_class_ids=None, owod_current_class_ids=None):
+             owod_previous_class_ids=None, owod_current_class_ids=None,
+             print_freq=100):
     model.eval()
     criterion.eval()
 
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(
+        delimiter=" ",
+        visible_meters={"class_error", "loss", "loss_ce", "loss_bbox", "loss_giou",
+                        "loss_objectness"})
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Test:'
     owod_predictions = []
@@ -147,7 +153,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             output_dir=os.path.join(output_dir, "panoptic_eval"),
         )
 
-    for samples, targets in metric_logger.log_every(data_loader, 10, header):
+    for samples, targets in metric_logger.log_every(
+            data_loader, max(1, int(print_freq)), header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 

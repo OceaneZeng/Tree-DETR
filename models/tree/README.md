@@ -87,9 +87,3 @@ UPGMA + n-ary collapse respecting `D_max`/max-children, insertion vote/affinity
 disagreement, cascade halt depths (0 / unknown / leaf) with beam=2, gap loss
 keeping a positive annulus + warmup gating + finite grads at cone poles,
 zero-init adapter identity + width clip bounds, scale bands + temperature NLL.
-
-## Stage-0 falsification suite (`tools/stage0/`)
-
-Runs on a *trained* detector before any tree training; each script prints its
-metric **and** the note's pass/fail gate. See `tools/stage0/README` for order
-(cheapest first: `f2` → `f1`/`f1b` → `f3`/`f4` → `n1` → `g1`).

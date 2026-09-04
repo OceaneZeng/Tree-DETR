@@ -40,6 +40,7 @@ class OWODBaselineTests(unittest.TestCase):
             self.assertEqual(payload["method"], "prob")
             self.assertTrue((out / "command.txt").exists())
             self.assertIn("--owod-baseline prob", (out / "command.txt").read_text(encoding="utf-8"))
+            self.assertIn("--no-file-log", command)
 
     def test_unknown_metrics_match_unknown_prediction(self):
         prediction = {"boxes": torch.tensor([[45.0, 45.0, 55.0, 55.0]]),

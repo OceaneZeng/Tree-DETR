@@ -197,9 +197,10 @@ def reduce_dict(input_dict, average=True):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t", visible_meters=None):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.visible_meters = set(visible_meters) if visible_meters is not None else None
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -219,6 +220,8 @@ class MetricLogger(object):
     def __str__(self):
         loss_str = []
         for name, meter in self.meters.items():
+            if self.visible_meters is not None and name not in self.visible_meters:
+                continue
             loss_str.append(
                 "{}: {}".format(name, str(meter))
             )

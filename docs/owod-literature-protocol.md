@@ -1,8 +1,8 @@
 # OWOD Literature Protocol and Experiment Reset
 
 This document records the protocol extracted from the core OWOD papers in the
-Zotero export. The Oxford-Pet runs remain engineering diagnostics; they are not
-the primary evidence for an OWOD claim.
+Zotero export. Only M-OWODB/S-OWODB experiments are used as evidence for the
+current method.
 
 ## What the papers actually evaluate
 
@@ -27,52 +27,18 @@ The principal split distinction is important:
 
 ## Consequence for this project
 
-The current graph-local Pet runner is **class-incremental object detection**,
-not full OWOD:
+The primary method is the trainable class-interference GNN evaluated directly
+under OWOD. Detector decoder-gradient sketches are class-node features and
+empirical source-update/target-loss increases from training data supervise the
+directed edges. The GNN selects a fixed-size old-class replay neighborhood for
+each increment and does not use validation labels.
 
-- it has no explicit `unknown` output;
-- it does not report U-Recall, A-OSE/WI, or UDR/UDP;
-- its six-class Pet split is not M-OWODB or S-OWODB;
-- its `AP50 >= 0.40` gate is project-specific, not a literature standard.
-
-The graph-local idea can first be tested honestly as an IOD method. Its central
-claim is then: a gradient-conflict neighborhood predicts old-class forgetting
-and beats a matched random neighborhood at the same replay/update budget.
-
-## Revised experiment order
-
-### Phase A: standard IOD, no unknown claim
-
-Use COCO 2017 and the CL-DETR disjoint-image protocols:
-
-1. `40+20x2` and `40+10x4` are the main multi-step settings.
-2. `70+10` is a two-phase sanity setting.
-3. Use three category/data orders and report mean and standard deviation.
-4. Fix a 10% exemplar-memory budget.
-5. Report AP, AP50, AP75, APs, APm, APl, old-class AP, new-class AP, all-class AP,
-   and forgetting percentage points.
-
-Required controls:
-
-- vanilla Deformable DETR fine-tuning;
-- replay or balanced fine-tuning;
-- KD + replay baseline (CL-DETR-style control);
-- global LoRA/replay;
-- matched random-neighborhood replay;
-- graph-local replay/update;
-- graph-local component ablations.
-
-The graph claim is supported only if graph-local beats the matched random
-neighborhood across the fixed budget and multiple seeds. A lower loss or a
-single improved seed is insufficient.
-
-### Phase B: full OWOD, only if an unknown branch is implemented
-
-Add an explicit class-agnostic objectness/unknown prediction path and evaluate
-on S-OWODB first, then M-OWODB for historical comparability. Required controls
-are vanilla D-DETR, ORE*, OW-DETR, and an Oracle upper bound. Report known mAP,
-U-Recall, A-OSE/WI, and UDR/UDP where the benchmark implementation supports
-them. Only this phase may be called an OWOD experiment.
+The main benchmark order is S-OWODB, followed by M-OWODB for historical
+comparison. Required controls are vanilla D-DETR, ORE*, OW-DETR, PROB, Oracle,
+matched Random-K replay, Global replay, and prototype Cosine-K as an ablation.
+Report Previous/Current/Known AP50 together with U-Recall, A-OSE, WI, UDR and
+UDP. A GNN claim requires improvement over matched Random-K across multiple
+seeds; lower training loss or one favorable run is insufficient.
 
 ## References checked
 

@@ -1,14 +1,10 @@
-"""Shared rank-0 console logging for reproducible experiments."""
+"""Compact, restart-aware experiment logging."""
 
 from __future__ import annotations
 
 import datetime
 import sys
 from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LOG_ROOT = PROJECT_ROOT / "log"
 
 
 class TeeStream:
@@ -38,17 +34,33 @@ class TeeStream:
 
 
 def experiment_log_path(output_dir, filename: str) -> Path:
-    """Return a central log path mirroring the experiment output directory."""
-    output_path = Path(output_dir).resolve()
-    try:
-        relative_output = output_path.relative_to(PROJECT_ROOT)
-    except ValueError:
-        relative_output = Path(output_path.name)
-    return LOG_ROOT / relative_output / filename
+    """Keep all logs beside the checkpoints they describe."""
+    return Path(output_dir).resolve() / filename
+
+
+def archive_log_file(path: str | Path) -> Path | None:
+    """Move a stale log aside instead of appending an unrelated run to it."""
+    source = Path(path)
+    if not source.is_file():
+        return None
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    archive_dir = source.parent / "log_archive" / stamp
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    destination = archive_dir / source.name
+    source.replace(destination)
+    return destination
+
+
+def prepare_log_file(path: str | Path, append: bool = False) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and not append:
+        archive_log_file(destination)
+    return destination
 
 
 def start_file_logging(args, is_main_process: bool = True):
-    """Capture stdout/stderr to the root ``log`` directory and keep the console."""
+    """Capture one run in ``output_dir/train.log``; append only for resume."""
     if not getattr(args, "output_dir", "") or not is_main_process:
         return None
     if getattr(args, "no_file_log", False):
@@ -56,13 +68,17 @@ def start_file_logging(args, is_main_process: bool = True):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     requested_path = getattr(args, "log_file", "")
-    log_path = (Path(requested_path) if Path(requested_path).is_absolute()
-                else LOG_ROOT / Path(requested_path)) if requested_path else \
-        experiment_log_path(output_dir, "train.log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = log_path.open("a", encoding="utf-8", buffering=1)
+    if requested_path:
+        requested = Path(requested_path)
+        log_path = requested if requested.is_absolute() else output_dir / requested
+    else:
+        log_path = experiment_log_path(output_dir, "train.log")
+    append = bool(getattr(args, "resume", "") or getattr(args, "append_log", False))
+    prepare_log_file(log_path, append=append)
+    handle = log_path.open("a" if append else "w", encoding="utf-8", buffering=1)
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-    handle.write(f"\n===== experiment start {timestamp} =====\n")
+    event = "resume" if append else "start"
+    handle.write(f"\n===== experiment {event} {timestamp} =====\n")
     handle.flush()
     original_stdout = sys.stdout
     original_stderr = sys.stderr

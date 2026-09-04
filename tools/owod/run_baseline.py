@@ -12,6 +12,7 @@ import json
 import shlex
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.owod_baselines import BASELINES, baseline_config_dict, normalize_baseline
+from util.experiment_log import prepare_log_file
 
 
 def _read_stage_metadata(manifest: Path, stage: int | None) -> dict[str, Any]:
@@ -63,6 +65,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nproc-per-node", default=1, type=int,
                         help="number of DDP processes; use 2 for the requested dual-card run")
     parser.add_argument("--master-port", default=29521, type=int)
+    parser.add_argument("--print-freq", default=100, type=int)
+    parser.add_argument("--eval-print-freq", default=100, type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--extra-main-arg", action="append", default=[],
                         help="Additional argument passed to main.py; repeatable")
@@ -79,7 +83,9 @@ def build_command(args: argparse.Namespace) -> list[str]:
                "--batch_size", str(args.batch_size), "--num_workers", str(args.num_workers),
                "--seed", str(args.seed), "--device", args.device,
                "--owod-baseline", method,
-               "--log-file", str(args.output_dir / "train.log")]
+               "--print-freq", str(getattr(args, "print_freq", 100)),
+               "--eval-print-freq", str(getattr(args, "eval_print_freq", 100)),
+               "--no-file-log"]
     nproc_per_node = int(getattr(args, "nproc_per_node", 1))
     master_port = int(getattr(args, "master_port", 29521))
     if nproc_per_node > 1:
@@ -151,8 +157,20 @@ def main() -> int:
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     if args.gpus:
         env["CUDA_VISIBLE_DEVICES"] = args.gpus
-    completed = subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False)
-    return int(completed.returncode)
+    train_log = prepare_log_file(args.output_dir / "train.log", append=False)
+    with train_log.open("w", encoding="utf-8", buffering=1) as handle:
+        handle.write(f"===== experiment start {datetime.now().isoformat(timespec='seconds')} =====\n")
+        handle.write(f"Command: {shlex.join(command)}\n")
+        process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, bufsize=1)
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            handle.write(line)
+        return_code = int(process.wait())
+        handle.write(f"===== experiment end return_code={return_code} =====\n")
+    return return_code
 
 
 if __name__ == "__main__":

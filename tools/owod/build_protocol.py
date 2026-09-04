@@ -21,8 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.iod.coco_incremental import (assign_images, choose_memory, filter_coco,
-                                        image_category_sets)
+from tools.owod.protocol_utils import (assign_images, choose_memory, filter_coco,
+                                       image_category_sets)
 
 
 def read_json(path: Path) -> dict:

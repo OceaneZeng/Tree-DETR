@@ -25,9 +25,10 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
-from util.checkpoint import (initialize_pet_classifier_from_coco,
-                             matching_state_dict)
-from util.experiment_log import experiment_log_path, start_file_logging, stop_file_logging
+from util.checkpoint import matching_state_dict
+from util.experiment_log import (archive_log_file, experiment_log_path,
+                                 prepare_log_file, start_file_logging,
+                                 stop_file_logging)
 from models.owod_baselines import BASELINES, baseline_config_dict, normalize_baseline
 
 
@@ -144,9 +145,6 @@ def get_args_parser():
     parser.add_argument('--focal_alpha', default=0.25, type=float)
     parser.add_argument('--class_embed_lr_mult', default=1.0, type=float,
                         help='learning-rate multiplier for a newly initialized classifier')
-    parser.add_argument('--init-pet-classifier-from-coco', action='store_true',
-                        help='Initialize Pet breed logits from COCO cat/dog rows in --pretrained')
-
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', default='./data/coco', type=str)
@@ -174,6 +172,10 @@ def get_args_parser():
                         help='skip validation during training; useful when DDP COCO gather is unstable')
     parser.add_argument('--eval_interval', default=1, type=int,
                         help='evaluate every N epochs; the final epoch is always evaluated')
+    parser.add_argument('--print-freq', default=100, type=int,
+                        help='training progress lines are printed every N iterations')
+    parser.add_argument('--eval-print-freq', default=100, type=int,
+                        help='evaluation progress lines are printed every N iterations')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     parser.add_argument('--lightweight', action='store_true',
@@ -192,7 +194,7 @@ def get_args_parser():
     parser.add_argument('--teacher-ground-truth-iou', default=0.5, type=float)
     parser.add_argument('--teacher-max-per-image', default=20, type=int)
     parser.add_argument('--log-file', default='', type=str,
-                        help='Human-readable log; relative paths are placed under the root log directory')
+                        help='Human-readable log; relative paths are placed under output_dir')
     parser.add_argument('--no-file-log', action='store_true',
                         help='Disable the rank-0 human-readable experiment log')
 
@@ -207,8 +209,12 @@ def main(args):
         run_config = vars(args).copy()
         run_config.update({'owod_baseline_config': baseline_config_dict(args.owod_baseline)})
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        with (Path(args.output_dir) / 'run_config.json').open('w', encoding='utf-8') as handle:
-            json.dump(run_config, handle, indent=2, sort_keys=True, default=str)
+        run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        history_path = Path(args.output_dir) / 'run_history' / f'{run_id}.json'
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        for config_path in (Path(args.output_dir) / 'run_config.json', history_path):
+            with config_path.open('w', encoding='utf-8') as handle:
+                json.dump(run_config, handle, indent=2, sort_keys=True, default=str)
         print('OWOD baseline:', json.dumps(baseline_config_dict(args.owod_baseline), sort_keys=True))
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -338,13 +344,6 @@ def main(args):
                 del compatible[key]
             print(f'Discarded {len(classifier_keys)} pretrained classifier tensors.')
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
-        if args.init_pet_classifier_from_coco:
-            copied = initialize_pet_classifier_from_coco(
-                model_without_ddp, state_dict, dataset_train.coco.cats.values())
-            if copied != args.num_classes:
-                raise RuntimeError(
-                    f'Expected to initialize {args.num_classes} Pet classifier rows, copied {copied}.')
-            print(f'Initialized {copied} Pet classifier rows from COCO cat/dog weights.')
         print(f'Loaded {len(compatible)} shape-compatible pretrained tensors only; skipped={skipped}.')
         if missing_keys:
             print('Missing Keys: {}'.format(missing_keys))
@@ -409,6 +408,7 @@ def main(args):
                 owod_unknown_threshold=args.unknown_threshold,
                 owod_previous_class_ids=args.owod_previous_class_ids,
                 owod_current_class_ids=args.owod_current_class_ids,
+                print_freq=args.eval_print_freq,
             )
     
     if args.eval:
@@ -417,13 +417,21 @@ def main(args):
                                               owod_known_class_ids=args.owod_known_class_ids,
                                               owod_unknown_threshold=args.unknown_threshold,
                                               owod_previous_class_ids=args.owod_previous_class_ids,
-                                              owod_current_class_ids=args.owod_current_class_ids)
+                                              owod_current_class_ids=args.owod_current_class_ids,
+                                              print_freq=args.eval_print_freq)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         stop_file_logging(file_log_state)
         return
 
     print("Start training")
+    structured_log = None
+    if args.output_dir and utils.is_main_process():
+        structured_log = experiment_log_path(output_dir, "metrics.jsonl")
+        prepare_log_file(structured_log, append=bool(args.resume))
+        completion_marker = output_dir / 'training_complete.json'
+        if completion_marker.is_file():
+            archive_log_file(completion_marker)
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         epoch_state['value'] = epoch
@@ -436,7 +444,8 @@ def main(args):
             teacher_score_threshold=args.teacher_score_threshold,
             teacher_duplicate_iou=args.teacher_duplicate_iou,
             teacher_ground_truth_iou=args.teacher_ground_truth_iou,
-            teacher_max_per_image=args.teacher_max_per_image)
+            teacher_max_per_image=args.teacher_max_per_image,
+            print_freq=args.print_freq)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -462,6 +471,7 @@ def main(args):
                 owod_unknown_threshold=args.unknown_threshold,
                 owod_previous_class_ids=args.owod_previous_class_ids,
                 owod_current_class_ids=args.owod_current_class_ids,
+                print_freq=args.eval_print_freq,
             )
         else:
             test_stats, coco_evaluator = {}, None
@@ -472,9 +482,7 @@ def main(args):
                      'n_parameters': n_parameters}
 
         if args.output_dir and utils.is_main_process():
-            structured_log = experiment_log_path(output_dir, "log.txt")
-            structured_log.parent.mkdir(parents=True, exist_ok=True)
-            with structured_log.open("a") as f:
+            with structured_log.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs

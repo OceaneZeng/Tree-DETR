@@ -38,8 +38,12 @@ Available method names are `vanilla_d_detr`, `ore_star`, `ow_detr`, `prob`, and
 `oracle`. They must only be reported as paper baselines after the corresponding
 paper-faithful implementation is verified; a shared detector with a renamed
 unknown score is not a valid reproduction. Every run writes the exact command and metadata to the output
-directory, while `main.py` writes both a human-readable `train.log` and
-structured per-epoch `log.txt`. When a full-label validation annotation and a
+directory. Every runner writes one human-readable `train.log`; `main.py` writes
+compact per-epoch records to `metrics.jsonl` in the same experiment directory.
+Progress logs show only primary losses while `metrics.jsonl` retains all
+auxiliary losses. A fresh run archives stale logs under `log_archive/`; a run
+with `--resume` appends to the active logs. External `tee` is not required.
+When a full-label validation annotation and a
 manifest are supplied, the same log also includes `owod_u_recall`,
 `owod_a_ose`, `owod_wi`, `owod_udr`, and `owod_udp`.
 
@@ -71,8 +75,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/owod/calibrate_interference_gnn.py \
   --owod-baseline vanilla_d_detr --num_classes 91 \
   --batch_size 1 --num_workers 4 --device cuda \
   --sketch-max-images 12 --probe-max-images 12 --probe-steps 3 \
-  --gnn-epochs 400 \
-  2>&1 | tee "$CAL/launcher.log"
+  --gnn-epochs 400
 ```
 
 The calibration writes `empirical_stage0.pt`, `gnn_stage0.pt`,
@@ -103,15 +106,15 @@ python tools/owod/run_graph_local_increment.py \
   --gnn-checkpoint "$CAL/gnn_stage0.pt" \
   --graph-k 5 --replay-budget 256 \
   --epochs 20 --batch-size 2 --num-workers 4 --eval-interval 5 \
-  --gpus 0,1 --nproc-per-node 2 --master-port 29561 \
-  2>&1 | tee "$OUT/launcher.log"
+  --gpus 0,1 --nproc-per-node 2 --master-port 29561
 ```
 
 `graph.json` records feature provenance, GNN checkpoint metadata, all
 current-to-old scores, the aggregated ranking, and selected replay classes.
 `gnn_node_features.pt` stores the exact inference-stage node features. Detector
-logs are in `graph/train.log`, `graph/console.log`, and the outer
-`launcher.log`.
+logs are `graph/train.log` and `graph/metrics.jsonl`. Exact commands and
+configuration are stored in `command.txt`, `run_config.json`, and
+`run_history/`.
 
 Prototype cosine remains available only as an ablation with an explicit flag:
 

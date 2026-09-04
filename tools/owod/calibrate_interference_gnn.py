@@ -7,7 +7,6 @@ import argparse
 import gc
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -72,18 +71,6 @@ def get_parser() -> argparse.ArgumentParser:
     parser.set_defaults(dataset_file="coco", masks=False, cache_mode=False,
                         two_stage=False, num_classes=91)
     return parser
-
-
-def rotate_log(path: Path) -> None:
-    if not path.is_file():
-        return
-    stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
-    archived = path.with_name(f"{path.stem}.{stamp}{path.suffix}")
-    counter = 1
-    while archived.exists():
-        archived = path.with_name(f"{path.stem}.{stamp}.{counter}{path.suffix}")
-        counter += 1
-    path.replace(archived)
 
 
 def source_masks(class_ids: list[int], valid: torch.Tensor, fraction: float,
@@ -160,7 +147,6 @@ def main() -> int:
         "git": utils.get_sha(),
     })
     log_path = Path(args.log_file).resolve() if args.log_file else args.output_dir / "calibration.log"
-    rotate_log(log_path)
     args.log_file = str(log_path)
     log_state = start_file_logging(args, is_main_process=True)
     try:

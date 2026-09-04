@@ -16,8 +16,10 @@ import argparse
 import json
 import os
 import random
+import shlex
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
@@ -33,6 +35,7 @@ from models.graph_local.replay import build_increment_annotation
 from tools.owod.gnn_calibration import (build_calibration_dataset,
                                         compute_gradient_sketches,
                                         load_detector)
+from util.experiment_log import prepare_log_file
 
 
 def read_json(path: Path) -> dict:
@@ -77,6 +80,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replay-budget", default=256, type=int)
     parser.add_argument("--control", choices=("graph", "random", "global"), default="graph")
     parser.add_argument("--eval-interval", default=5, type=int)
+    parser.add_argument("--print-freq", default=100, type=int)
+    parser.add_argument("--eval-print-freq", default=100, type=int)
     parser.add_argument("--lr-drop", default=15, type=int)
     parser.add_argument("--unknown-threshold", default=0.5, type=float)
     parser.add_argument("--lightweight", action="store_true")
@@ -314,7 +319,9 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--owod-current-class-ids", *[str(value) for value in active_ids if value not in set(old_ids)],
             "--unknown-threshold", str(args.unknown_threshold),
             "--eval_interval", str(args.eval_interval), "--lr_drop", str(args.lr_drop),
-            "--log-file", str(arm_dir / "train.log")]
+            "--print-freq", str(args.print_freq),
+            "--eval-print-freq", str(args.eval_print_freq),
+            "--no-file-log"]
     if old_ids:
         main += ["--owod-previous-class-ids", *[str(value) for value in old_ids]]
     if args.resume:
@@ -343,14 +350,18 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
     return [sys.executable] + main
 
 
-def stream_process(command: list[str], output_dir: Path, env: dict[str, str], dry_run: bool) -> int:
+def stream_process(command: list[str], output_dir: Path, env: dict[str, str],
+                   dry_run: bool, append: bool = False) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "command.txt").write_text(" ".join(command) + "\n", encoding="utf-8")
+    (output_dir / "command.txt").write_text(shlex.join(command) + "\n", encoding="utf-8")
     if dry_run:
-        print(" ".join(command))
+        print(shlex.join(command))
         return 0
-    console = output_dir / "console.log"
-    with console.open("w", encoding="utf-8") as handle:
+    train_log = prepare_log_file(output_dir / "train.log", append=append)
+    with train_log.open("a" if append else "w", encoding="utf-8", buffering=1) as handle:
+        event = "resume" if append else "start"
+        handle.write(f"===== experiment {event} {datetime.now().isoformat(timespec='seconds')} =====\n")
+        handle.write(f"Command: {shlex.join(command)}\n")
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
         assert process.stdout is not None
@@ -358,7 +369,9 @@ def stream_process(command: list[str], output_dir: Path, env: dict[str, str], dr
             print(line, end="")
             handle.write(line)
             handle.flush()
-        return int(process.wait())
+        return_code = int(process.wait())
+        handle.write(f"===== experiment end return_code={return_code} =====\n")
+        return return_code
 
 
 def main() -> int:
@@ -466,10 +479,10 @@ def main() -> int:
     env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     if args.gpus:
         env["CUDA_VISIBLE_DEVICES"] = args.gpus
-    code = stream_process(command, arm_dir, env, args.dry_run)
+    code = stream_process(command, arm_dir, env, args.dry_run, append=bool(args.resume))
     write_json(args.output_dir / "summary.json", {**metadata, "return_code": code,
                 "train_log": str((arm_dir / "train.log").resolve()),
-                "console_log": str((arm_dir / "console.log").resolve())})
+                "metrics_log": str((arm_dir / "metrics.jsonl").resolve())})
     return code
 
 
