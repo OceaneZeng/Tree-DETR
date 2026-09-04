@@ -24,6 +24,7 @@ from tools.owod.gnn_calibration import (build_calibration_dataset, class_loss,
                                         compute_gradient_sketches, atomic_torch_save,
                                         empirical_harm_row, load_detector,
                                         run_source_probe, set_seed)
+from tools.owod.protocol import stage_files
 from util.experiment_log import start_file_logging, stop_file_logging
 import util.misc as utils
 
@@ -62,6 +63,13 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gnn-hidden-dim", default=64, type=int)
     parser.add_argument("--gnn-message-steps", default=2, type=int)
     parser.add_argument("--gnn-dropout", default=0.0, type=float)
+    parser.add_argument(
+        "--gnn-ablation",
+        choices=("full", "no_node_encoder", "no_message_passing", "no_ranking_loss"),
+        default="full",
+        help="remove exactly one GNN component for the primary ablation table",
+    )
+    parser.add_argument("--gnn-ranking-margin", default=0.25, type=float)
     parser.add_argument("--gnn-epochs", default=400, type=int)
     parser.add_argument("--gnn-lr", default=1e-3, type=float)
     parser.add_argument("--validation-fraction", default=0.2, type=float)
@@ -71,6 +79,22 @@ def get_parser() -> argparse.ArgumentParser:
     parser.set_defaults(dataset_file="coco", masks=False, cache_mode=False,
                         two_stage=False, num_classes=91)
     return parser
+
+
+def resolve_gnn_ablation(args: argparse.Namespace) -> dict[str, object]:
+    """Translate one named ablation into explicit, checkpointed settings."""
+    return {
+        "name": args.gnn_ablation,
+        "use_node_encoder": args.gnn_ablation != "no_node_encoder",
+        "message_steps": (0 if args.gnn_ablation == "no_message_passing"
+                          else int(args.gnn_message_steps)),
+        "ranking_weight": (0.0 if args.gnn_ablation == "no_ranking_loss" else 1.0),
+        "ranking_margin": float(args.gnn_ranking_margin),
+    }
+
+
+def ablation_suffix(name: str) -> str:
+    return "" if name == "full" else f"_{name}"
 
 
 def source_masks(class_ids: list[int], valid: torch.Tensor, fraction: float,
@@ -140,13 +164,15 @@ def main() -> int:
     if not args.manifest.is_file():
         raise SystemExit(f"Missing OWOD manifest: {args.manifest}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    write_json(args.output_dir / "run_config.json", {
+    suffix = ablation_suffix(args.gnn_ablation)
+    write_json(args.output_dir / f"run_config{suffix}.json", {
         "runner": "tools/owod/calibrate_interference_gnn.py",
         "arguments": vars(args),
         "argv": sys.argv,
         "git": utils.get_sha(),
     })
-    log_path = Path(args.log_file).resolve() if args.log_file else args.output_dir / "calibration.log"
+    log_path = (Path(args.log_file).resolve() if args.log_file
+                else args.output_dir / f"calibration{suffix}.log")
     args.log_file = str(log_path)
     log_state = start_file_logging(args, is_main_process=True)
     try:
@@ -157,6 +183,8 @@ def main() -> int:
 
 def run(args: argparse.Namespace) -> int:
     set_seed(args.seed)
+    ablation = resolve_gnn_ablation(args)
+    suffix = ablation_suffix(args.gnn_ablation)
     manifest = read_json(args.manifest)
     stages = manifest.get("stages", [])
     if args.stage < 0 or args.stage >= len(stages):
@@ -167,9 +195,8 @@ def run(args: argparse.Namespace) -> int:
     probe_sources = class_ids[:args.source_limit] if args.source_limit else class_ids
     if len(probe_sources) < 2:
         raise ValueError("Calibration requires at least two source classes")
-    annotation = args.manifest.parent / f"stage_{args.stage}" / "instances_train2017.json"
-    if not annotation.is_file():
-        raise FileNotFoundError(f"Missing calibration annotation: {annotation}")
+    _manifest, files = stage_files(args.manifest, args.stage)
+    annotation = files["train"]
     if args.force:
         print("--force ignores existing sketch and harm-row cache files")
 
@@ -184,6 +211,7 @@ def run(args: argparse.Namespace) -> int:
         "device": str(device),
         "deterministic_calibration_transforms": True,
         "uses_validation_labels": False,
+        "gnn_ablation": ablation,
     }, indent=2))
     dataset = build_calibration_dataset(Path(args.coco_path).resolve(), annotation,
                                         lightweight=args.lightweight)
@@ -313,6 +341,7 @@ def run(args: argparse.Namespace) -> int:
             "probe_lr": args.probe_lr,
             "probed_source_classes": probe_sources,
             "production_ready": len(probe_sources) == len(class_ids),
+            "gnn_ablation": ablation,
         },
     }
     artifact_path = args.output_dir / f"empirical_stage{args.stage}.pt"
@@ -328,10 +357,13 @@ def run(args: argparse.Namespace) -> int:
         ordered_ids, valid, args.validation_fraction, args.seed)
     validation_model = ClassInterferenceGNN(
         input_dim=args.feature_dim, hidden_dim=args.gnn_hidden_dim,
-        message_steps=args.gnn_message_steps, dropout=args.gnn_dropout).to(device)
+        message_steps=ablation["message_steps"], dropout=args.gnn_dropout,
+        use_node_encoder=ablation["use_node_encoder"]).to(device)
     validation_history = fit_interference_gnn(
         validation_model, [{**artifact, "valid_mask": train_mask}],
-        epochs=args.gnn_epochs, lr=args.gnn_lr)
+        epochs=args.gnn_epochs, lr=args.gnn_lr,
+        ranking_margin=ablation["ranking_margin"],
+        ranking_weight=ablation["ranking_weight"])
     validation_metrics = prediction_metrics(
         validation_model, artifact, validation_mask, args.validation_k)
     print("Held-out source validation:", json.dumps({
@@ -340,10 +372,13 @@ def run(args: argparse.Namespace) -> int:
     set_seed(args.seed)
     final_model = ClassInterferenceGNN(
         input_dim=args.feature_dim, hidden_dim=args.gnn_hidden_dim,
-        message_steps=args.gnn_message_steps, dropout=args.gnn_dropout).to(device)
+        message_steps=ablation["message_steps"], dropout=args.gnn_dropout,
+        use_node_encoder=ablation["use_node_encoder"]).to(device)
     final_history = fit_interference_gnn(
-        final_model, [artifact], epochs=args.gnn_epochs, lr=args.gnn_lr)
-    checkpoint_path = args.output_dir / f"gnn_stage{args.stage}.pt"
+        final_model, [artifact], epochs=args.gnn_epochs, lr=args.gnn_lr,
+        ranking_margin=ablation["ranking_margin"],
+        ranking_weight=ablation["ranking_weight"])
+    checkpoint_path = args.output_dir / f"gnn_stage{args.stage}{suffix}.pt"
     metadata = {
         **artifact["metadata"],
         "artifact": str(artifact_path),
@@ -353,6 +388,7 @@ def run(args: argparse.Namespace) -> int:
         "held_out_source_validation": {"classes": held_out, **validation_metrics},
         "epochs": args.gnn_epochs,
         "final_training_loss": final_history[-1],
+        "gnn_ablation": ablation,
     }
     save_gnn_checkpoint(final_model, checkpoint_path, extra=metadata)
     summary = {
@@ -366,14 +402,16 @@ def run(args: argparse.Namespace) -> int:
         "validation": {"classes": held_out, **validation_metrics},
         "validation_training_loss": validation_history[-1],
         "final_training_loss": final_history[-1],
+        "gnn_ablation": ablation,
     }
-    write_json(args.output_dir / "calibration_summary.json", summary)
-    write_json(args.output_dir / "gnn_history.json", {
+    write_json(args.output_dir / f"calibration_summary{suffix}.json", summary)
+    write_json(args.output_dir / f"gnn_history{suffix}.json", {
         "validation_model": validation_history, "final_model": final_history})
-    write_json(args.output_dir / "calibration_complete.json", {
+    write_json(args.output_dir / f"calibration_complete{suffix}.json", {
         "stage": args.stage, "class_count": size,
         "gnn_checkpoint": str(checkpoint_path),
-        "production_ready": len(probe_sources) == len(class_ids)})
+        "production_ready": len(probe_sources) == len(class_ids),
+        "gnn_ablation": ablation})
     print(json.dumps(summary, indent=2))
     return 0
 

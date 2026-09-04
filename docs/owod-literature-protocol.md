@@ -1,49 +1,68 @@
-# OWOD Literature Protocol and Experiment Reset
+# DEUS-aligned OWOD research protocol
 
-This document records the protocol extracted from the core OWOD papers in the
-Zotero export. Only M-OWODB/S-OWODB experiments are used as evidence for the
-current method.
+## Paper pipeline
 
-## What the papers actually evaluate
+DEUS addresses two separate OWOD problems. EUS constructs fixed Simplex ETF
+known and unknown subspaces and optimizes energy-margin plus focal objectives
+to separate known, unknown, and background proposals. EKD splits the known
+classifier into previous-task and current-task subsets and applies a pairwise
+energy loss during replay to reduce cross-task interference. Its full objective
+is classification + box regression + EUS + EKD.
 
-| Work | Detector and benchmark | Main baselines | Main metrics |
-|---|---|---|---|
-| ORE (Joseph et al., CVPR 2021) | Faster R-CNN R50; M-OWODB from VOC + COCO, four tasks of 20 classes; VOC 10+10, 15+5, 19+1 IOD | Faster R-CNN, fine-tuning, Oracle, ILOD/Faster ILOD | known mAP, U-Recall, WI, A-OSE |
-| OW-DETR (Gupta et al., CVPR 2022) | Deformable DETR; M-OWODB and stricter S-OWODB (COCO super-category-separated); VOC IOD | Faster R-CNN, vanilla D-DETR, ORE without EBUI, Oracle | known mAP, U-Recall, WI, A-OSE |
-| Revisiting OWOD (Zhao et al., 2023) | COCO-only fair benchmark; four tasks, disjoint data, full test labels for unknowns | Faster R-CNN, fine-tuning, ORE and ORE* | mAP, U-Recall, WI/A-OSE, UDR, UDP |
-| PROB (Zohar et al., CVPR 2023) | D-DETR with DINO R50 FPN, M-OWODB and S-OWODB; VOC IOD | D-DETR, ORE*, UC-OWOD, OCPL, 2B-OCD, OW-DETR, Oracle | known mAP, U-Recall, A-OSE/WI; VOC old/new/all mAP |
-| CL-DETR (Liu et al., CVPR 2023) | COCO 2017 IOD, `70+10`, `40+40`, `40+20x2`, `40+10x4`; three random orders, 10% exemplar memory | Deformable DETR, UP-DETR, LwF, RILOD, SID, ERD | AP/AP50/AP75/APs/m/l, old AP, forgetting percentage points |
+The paper uses OrthogonalDet in MMDetection, sets both EUS and EKD weights to
+1.0, and uses a 128-vector ETF divided into 64 known-space and 64
+unknown-space vectors. The present project does not replace its Deformable DETR
+detector and does not claim EUS/EKD as implemented components.
 
-The principal split distinction is important:
+## Experimental setting adopted here
 
-- **M-OWODB** is the mixed-superclass protocol introduced by ORE. It is useful
-  for historical comparison but has cross-task semantic leakage and, in the
-  original formulation, an unknown-validation leakage issue.
-- **S-OWODB** groups COCO by super-category, so related classes are not spread
-  across tasks. It is the stricter primary protocol for a new claim.
-- **Revisiting OWOD** requires class openness, task increment, annotation
-  specificity, label integrity, and data specificity. Its criticism of ORE is
-  why `ORE*` (without EBUI) is the fair comparison.
+- M-OWODB and S-OWODB, each with four non-overlapping incremental tasks.
+- Official annotations only; generated random or heuristic splits are rejected.
+- Full-label validation for evaluating classes not known at the current task.
+- Previous, Current, and all Known mAP; unknown recall (U-Rec); harmonic mean
+  between Known mAP and U-Rec (H-Score).
+- Task 4 reports known mAP only because all benchmark classes have been seen.
+- Fixed exemplars per replayed class, with the exact count supplied from the
+  official supplementary recipe rather than a repository default.
 
-## Consequence for this project
+The DEUS paper's Appendix A, which contains exact replay and improved
+pseudo-label details, is not included in the supplied ten-page PDF. Those
+values must be confirmed from the official supplementary material before
+claiming an exact reproduction.
 
-The primary method is the trainable class-interference GNN evaluated directly
-under OWOD. Detector decoder-gradient sketches are class-node features and
-empirical source-update/target-loss increases from training data supervise the
-directed edges. The GNN selects a fixed-size old-class replay neighborhood for
-each increment and does not use validation labels.
+## Baseline policy
 
-The main benchmark order is S-OWODB, followed by M-OWODB for historical
-comparison. Required controls are vanilla D-DETR, ORE*, OW-DETR, PROB, Oracle,
-matched Random-K replay, Global replay, and prototype Cosine-K as an ablation.
-Report Previous/Current/Known AP50 together with U-Recall, A-OSE, WI, UDR and
-UDP. A GNN claim requires improvement over matched Random-K across multiple
-seeds; lower training loss or one favorable run is insufficient.
+Table 1 compares ORE, OW-DETR, CAT, PROB, OrthogonalDet, O1O, OWOBJ, and DEUS.
+All eight rows are preserved in `tools/owod/deus_table1.json`. PROB and
+OrthogonalDet on M-OWODB are daggered reruns with the annotation duplication
+bug corrected.
 
-## References checked
+These are external baselines with different architectures and training
+recipes. This repository does not rename one Deformable DETR implementation to
+simulate them. The local comparison consists of:
 
-- ORE: <https://arxiv.org/abs/2103.02603>
-- OW-DETR: <https://arxiv.org/abs/2112.01513>
-- Revisiting OWOD: <https://arxiv.org/abs/2201.00471>
-- PROB: <https://openaccess.thecvf.com/content/CVPR2023/html/Zohar_PROB_Probabilistic_Objectness_for_Open_World_Object_Detection_CVPR_2023_paper.html>
-- CL-DETR: <https://arxiv.org/abs/2304.03110>
+- Deformable DETR control.
+- GNN Top-K class-local replay (the proposed method).
+- matched Random-K replay.
+- Global old-class replay.
+
+The primary method ablation is `Full`, `w/o Node Encoder`, `w/o Directed
+Message Passing`, and `w/o Pairwise Ranking Loss`. Each row removes exactly one
+GNN component while keeping the Deformable DETR checkpoint, replay quota,
+Top-K, seed, and schedule fixed. Random/global replay remain optional sanity
+controls; cosine similarity is not used as a component ablation.
+
+External method numbers must either be cited as Table 1 references or produced
+by the method's actual implementation on the validated annotations.
+
+## Table 1 headline comparisons
+
+On M-OWODB, DEUS reaches U-Rec/H-Score of 65.1/65.6, 66.2/59.0, and 69.0/58.0
+for Tasks 1-3. The strongest non-DEUS H-Scores are O1O's 56.1, 51.6, and 47.4.
+Task 4 Known mAP is 46.0 for DEUS versus 44.7 for OrthogonalDet and 42.4 for
+O1O.
+
+On S-OWODB, DEUS reaches U-Rec/H-Score of 68.7/70.1, 62.9/57.4, and 60.7/55.4
+for Tasks 1-3. O1O is the strongest competing H-Score method at 59.1, 52.8,
+and 47.4. Task 4 Known mAP is 48.8 for DEUS, 46.2 for OrthogonalDet, and 45.9
+for O1O.

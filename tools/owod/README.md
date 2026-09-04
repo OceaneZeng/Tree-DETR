@@ -1,131 +1,183 @@
-# OWOD baselines
+# Deformable DETR + GNN on the DEUS OWOD protocol
 
-This directory replaces the removed IOD baseline launchers with the primary
-OWOD experiment entry points.
+This project keeps Deformable DETR as its detector. It adopts the experimental
+shape of DEUS (CVPR 2026): four sequential tasks on M-OWODB and S-OWODB,
+class-balanced exemplar replay, full-label evaluation, and the Table 1 columns
+Previous/Current/Known mAP, U-Rec, and H-Score.
 
-## Build a protocol
+The local method is not a reimplementation of DEUS. DEUS uses OrthogonalDet,
+ETF-Subspace Unknown Separation (EUS), and Energy-based Known Distinction
+(EKD). Here a trainable GNN estimates directed class interference and selects
+old-class exemplars for Deformable DETR. The detector backbone is unchanged.
+
+## 1. Register official annotations
+
+The repository no longer synthesizes an OWODB split. Obtain the official
+four-task annotation files and arrange them under `stage_0` through `stage_3`.
+Each stage must contain:
+
+- `instances_increment_train2017.json`
+- `instances_train2017.json` (current data plus the official replay memory)
+- `instances_val2017.json`
+- `instances_val2017_full.json`
+
+Then validate and register them:
 
 ```bash
-python tools/owod/build_protocol.py \
-  --coco-root data/coco \
-  --output-root data/coco-owod/s-owodb/order0 \
-  --protocol s-owodb --order random --seed 42
+python tools/owod/prepare_protocol.py \
+  --annotation-root "$PWD/data/coco-owod/m-owodb/official" \
+  --protocol m-owodb \
+  --source-reference "<official-release-url-or-commit>" \
+  --output "$PWD/data/coco-owod/m-owodb/split_manifest.json"
 ```
 
-S-OWODB (Strict OWODB) keeps semantically related COCO categories in the same
-super-category-based task partition, avoiding the mixed-supercategory leakage
-of historical M-OWODB. For exact S-OWODB reproduction, the official class
-grouping must be passed through `--groups-json`; the builder refuses to invent
-a grouping unless `--allow-heuristic-groups` is explicitly used for a smoke
-test. M-OWODB is the historical mixed-supercategory protocol with four
-20-class stages.
+The importer requires four disjoint increments, cumulative known classes, all
+80 COCO classes in every full validation file, and no repeated increment images.
+It records SHA-256 hashes and the supplied official source reference. The last check
+guards against the M-OWODB annotation duplication bug noted in DEUS Table 1.
 
-## Run a baseline
+## 2. External Table 1 baselines
+
+ORE, OW-DETR, CAT, PROB, OrthogonalDet, O1O, OWOBJ, and DEUS are external
+methods. They are not aliases for this repository's detector. The values
+transcribed from DEUS Table 1 are stored in `deus_table1.json`:
 
 ```bash
-python tools/owod/run_baseline.py \
-  --method prob \
-  --coco-path data/coco \
-  --train-ann data/coco-owod/s-owodb/order0/stage_0/instances_train2017.json \
-  --val-ann data/coco-owod/s-owodb/order0/stage_0/instances_val2017_full.json \
-  --manifest data/coco-owod/s-owodb/order0/split_manifest.json \
+python tools/owod/table1_reference.py --protocol m-owodb
+python tools/owod/table1_reference.py --protocol s-owodb
+```
+
+For a claimed reproduction, run each method's real implementation on the same
+validated annotations. The paper marks the M-OWODB PROB and OrthogonalDet rows
+with a dagger because those two were rerun after correcting duplicated
+annotations. Values in `deus_table1.json` are literature references, not local
+measurements.
+
+## 3. Deformable DETR control
+
+The only locally implemented detector control is named
+`deformable_detr_control`:
+
+```bash
+python tools/owod/run_detector_control.py \
+  --coco-path "$PWD/data/coco" \
+  --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
   --stage 0 \
-  --output-dir exps/owod/s-owodb/order0/prob/stage_0 \
+  --output-dir "$PWD/exps/owod/m-owodb/deformable_detr_control/stage_0" \
+  --pretrained "$PWD/pretrained/r50_deformable_detr-checkpoint.pth" \
+  --epochs 50 --batch-size 2 --num-workers 4 \
   --gpus 0,1 --nproc-per-node 2
 ```
 
-Available method names are `vanilla_d_detr`, `ore_star`, `ow_detr`, `prob`, and
-`oracle`. They must only be reported as paper baselines after the corresponding
-paper-faithful implementation is verified; a shared detector with a renamed
-unknown score is not a valid reproduction. Every run writes the exact command and metadata to the output
-directory. Every runner writes one human-readable `train.log`; `main.py` writes
-compact per-epoch records to `metrics.jsonl` in the same experiment directory.
-Progress logs show only primary losses while `metrics.jsonl` retains all
-auxiliary losses. A fresh run archives stale logs under `log_archive/`; a run
-with `--resume` appends to the active logs. External `tee` is not required.
-When a full-label validation annotation and a
-manifest are supplied, the same log also includes `owod_u_recall`,
-`owod_a_ose`, `owod_wi`, `owod_udr`, and `owod_udp`.
+This control uses `1 - max(known probability)` as a simple unknown score. It
+must not be reported as ORE, PROB, OW-DETR, or DEUS.
 
-## Graph-local OWOD idea
+## 4. Calibrate the GNN
 
-The main method is a trainable side-car GNN, not classifier-prototype cosine.
-It does not run in the detector inference path. First, a completed earlier
-detector is probed on that stage's training data. Decoder-FFN gradient sketches
-are the class-node features and the measured increase in target-class training
-loss after a short source-class LoRA update is the directed edge supervision.
-No validation annotations are used for either feature extraction or harm
-labels. Per-class sketches and per-source harm rows are cached, so an
-interrupted calibration can be resumed by running the same command.
-
-Before the full calibration, a pipeline-only smoke test can add
-`--source-limit 2 --sketch-max-images 2 --probe-max-images 2 --gnn-epochs 5`
-and use a separate output directory. Its checkpoint is marked
-`production_ready=false` and is intentionally rejected by the Stage 1 runner.
+Calibrate directed interference only from completed training-stage data. No
+validation labels are used. Decoder FFN gradient sketches form class-node
+features; the increase in target-class detector loss after a short source-class
+LoRA probe supervises each edge.
 
 ```bash
-CAL="$PWD/exps/owod/m-owodb/order0/graph_local/gnn_calibration_stage0"
-mkdir -p "$CAL"
+CAL="$PWD/exps/owod/m-owodb/gnn/calibration_stage0"
 CUDA_VISIBLE_DEVICES=0 python tools/owod/calibrate_interference_gnn.py \
   --coco_path "$PWD/data/coco" \
-  --manifest "$PWD/data/coco-owod/m-owodb/order0/split_manifest.json" \
+  --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
   --stage 0 \
-  --checkpoint "$PWD/exps/owod/m-owodb/order0/vanilla_d_detr/stage_0_50ep/checkpoint.pth" \
-  --output-dir "$CAL" \
-  --owod-baseline vanilla_d_detr --num_classes 91 \
+  --checkpoint "$PWD/exps/owod/m-owodb/deformable_detr_control/stage_0/checkpoint.pth" \
+  --output-dir "$CAL" --num_classes 91 \
   --batch_size 1 --num_workers 4 --device cuda \
   --sketch-max-images 12 --probe-max-images 12 --probe-steps 3 \
   --gnn-epochs 400
 ```
 
-The calibration writes `empirical_stage0.pt`, `gnn_stage0.pt`,
-`calibration.log`, `calibration_summary.json`, and
-`calibration_complete.json`. The summary includes a held-out-source check;
-inspect it before treating the GNN as a useful estimator.
+The calibration writes `gnn_stage0.pt`, empirical labels, a held-out-source
+summary, and a completion marker. A smoke calibration made with
+`--source-limit` is marked non-production and is rejected by the runner.
 
-For Stage 1, gradient sketches for old classes come from Stage 0 retained
-training data and sketches for current classes come from the Stage 1 increment
-training data. The GNN predicts all directed current-to-old edges. Each old
-class receives its maximum predicted risk over current classes and
-`--graph-k` selects the total stage-level Top-K replay neighborhood. At stage
-`t > 0`, replay exemplars are drawn from stage `t - 1`, never from the current
-increment annotation.
+## 5. Run the GNN method
+
+DEUS states that replay stores a fixed number of exemplars per class, but the
+main paper defers the exact number and pseudo-label details to Appendix A. Set
+`EPC` to the verified value from the official supplementary recipe; the runner
+does not invent a default.
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1
-OUT="$PWD/exps/owod/m-owodb/order0/graph_local/stage_1_gnn_k5_v1"
-mkdir -p "$OUT"
+EPC=<official_exemplars_per_class>
+OUT="$PWD/exps/owod/m-owodb/gnn/stage_1_k5"
 python tools/owod/run_graph_local_increment.py \
   --coco-path "$PWD/data/coco" \
-  --manifest "$PWD/data/coco-owod/m-owodb/order0/split_manifest.json" \
+  --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
   --stage 1 \
-  --checkpoint "$PWD/exps/owod/m-owodb/order0/vanilla_d_detr/stage_0_50ep/checkpoint.pth" \
-  --output-dir "$OUT" \
-  --owod-baseline vanilla_d_detr \
-  --graph-estimator gnn \
+  --checkpoint "$PWD/exps/owod/m-owodb/deformable_detr_control/stage_0/checkpoint.pth" \
   --gnn-checkpoint "$CAL/gnn_stage0.pt" \
-  --graph-k 5 --replay-budget 256 \
+  --output-dir "$OUT" \
+  --graph-k 5 --exemplars-per-class "$EPC" \
   --epochs 20 --batch-size 2 --num-workers 4 --eval-interval 5 \
   --gpus 0,1 --nproc-per-node 2 --master-port 29561
 ```
 
-`graph.json` records feature provenance, GNN checkpoint metadata, all
-current-to-old scores, the aggregated ranking, and selected replay classes.
-`gnn_node_features.pt` stores the exact inference-stage node features. Detector
-logs are `graph/train.log` and `graph/metrics.jsonl`. Exact commands and
-configuration are stored in `command.txt`, `run_config.json`, and
-`run_history/`.
+Optional replay sanity controls use the same split, detector checkpoint,
+exemplar count, seed, and training schedule:
 
-Prototype cosine remains available only as an ablation with an explicit flag:
+- `--control graph`: GNN Top-K old classes.
+- `--control random`: Random-K old classes.
+- `--control global`: all old classes.
+
+The graph arm requires `--gnn-checkpoint`. Report at least three seeds before
+claiming an improvement.
+
+## 6. Primary three-component ablation
+
+The main ablation is internal to the GNN. It does not compare against cosine
+similarity. Train four GNN checkpoints from the same cached empirical harm
+artifact:
 
 ```bash
-python tools/owod/run_graph_local_increment.py ... \
-  --graph-estimator cosine --graph-k 5
+for ABLATION in full no_node_encoder no_message_passing no_ranking_loss; do
+  python tools/owod/calibrate_interference_gnn.py \
+    --coco_path "$PWD/data/coco" \
+    --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
+    --stage 0 \
+    --checkpoint "$PWD/exps/owod/m-owodb/deformable_detr_control/stage_0/checkpoint.pth" \
+    --output-dir "$CAL" --num_classes 91 \
+    --batch_size 1 --num_workers 4 --device cuda \
+    --sketch-max-images 12 --probe-max-images 12 --probe-steps 3 \
+    --gnn-epochs 400 --gnn-ablation "$ABLATION"
+done
 ```
 
-Do not use the legacy cosine-generated `gnn_stage.pt` files as GNN training
-labels. The runner rejects checkpoints without
-`supervision=empirical_train_loss_increase`. To continue an interrupted
-detector arm, keep the same output directory and add
-`--resume "$OUT/graph/checkpoint.pth"`, while leaving `--checkpoint` pointed at
-the previous completed stage detector.
+The four rows are:
+
+- `full`: node encoder + directed message passing + ranking loss.
+- `no_node_encoder`: a fixed parameter-free pooling replaces the learned node encoder.
+- `no_message_passing`: directed edge MLP sees node pairs without graph aggregation.
+- `no_ranking_loss`: retains continuous harm regression but removes pairwise ranking.
+
+The first run creates detector sketches and empirical harm labels. Later runs
+reuse those caches from the same `CAL` directory, so differences come from the
+GNN component rather than a new detector probe. The checkpoints are
+`gnn_stage0.pt`, `gnn_stage0_no_node_encoder.pt`,
+`gnn_stage0_no_message_passing.pt`, and `gnn_stage0_no_ranking_loss.pt`.
+
+Run the Stage 1 detector command once per checkpoint, changing only
+`--gnn-checkpoint` and `--output-dir`. Keep the detector checkpoint, Top-K,
+per-class exemplar count, seed, and training schedule identical.
+
+`--control random` and `--control global` remain optional replay sanity checks;
+they are not rows in the three-component GNN ablation table.
+
+## 7. Logs and metrics
+
+Each experiment directory contains:
+
+- `train.log`: compact human-readable output.
+- `metrics.jsonl`: complete per-epoch structured metrics.
+- `run_config.json` and `run_history/`: exact configuration provenance.
+- `training_complete.json`: written only after normal completion.
+
+Evaluation prints `OWOD Table 1 (%)` in percentage points. A displayed value of
+`53.1` corresponds to a raw metric of `0.531`; these are not different scores.
+U-Rec and H-Score are omitted at Task 4 when no unknown ground truth remains.
+A-OSE, WI, UDR, and UDP remain diagnostic metrics outside the main DEUS table.

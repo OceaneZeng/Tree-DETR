@@ -25,7 +25,7 @@ from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
 from .deformable_transformer import build_deforamble_transformer
-from .owod_baselines import baseline_config, normalize_baseline, unknown_score
+from .owod_detector import unknown_score
 import copy
 
 
@@ -36,8 +36,7 @@ def _get_clones(module, N):
 class DeformableDETR(nn.Module):
     """ This is the Deformable DETR module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels,
-                 aux_loss=True, with_box_refine=False, two_stage=False,
-                 owod_baseline="vanilla_d_detr"):
+                 aux_loss=True, with_box_refine=False, two_stage=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -84,10 +83,6 @@ class DeformableDETR(nn.Module):
         self.aux_loss = aux_loss
         self.with_box_refine = with_box_refine
         self.two_stage = two_stage
-        self.owod_baseline = normalize_baseline(owod_baseline)
-        owod_config = baseline_config(self.owod_baseline)
-        self.objectness_embed = nn.Linear(hidden_dim, 1) if owod_config.has_objectness_head else None
-
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
@@ -183,8 +178,6 @@ class DeformableDETR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
 
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-        if self.objectness_embed is not None:
-            out['pred_objectness'] = self.objectness_embed(hs[-1])
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
@@ -208,8 +201,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, matcher, weight_dict, losses, focal_alpha=0.25,
-                 owod_baseline="vanilla_d_detr", objectness_loss_coef=1.0):
+    def __init__(self, num_classes, matcher, weight_dict, losses, focal_alpha=0.25):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -224,8 +216,6 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
-        self.owod_baseline = normalize_baseline(owod_baseline)
-        self.objectness_loss_coef = float(objectness_loss_coef)
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
@@ -290,22 +280,6 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
-    def loss_objectness(self, outputs, targets, indices, num_boxes):
-        """Train a foreground objectness head on matched known objects.
-
-        Unknown annotations, when present in a future OWOD annotation adapter,
-        are also treated as foreground by the adapter before matching.  The
-        base detector remains compatible with ordinary COCO annotations.
-        """
-        if "pred_objectness" not in outputs:
-            return {}
-        logits = outputs["pred_objectness"].squeeze(-1)
-        target = torch.zeros_like(logits)
-        src_idx = self._get_src_permutation_idx(indices)
-        target[src_idx] = 1.0
-        loss = F.binary_cross_entropy_with_logits(logits, target, reduction="mean")
-        return {"loss_objectness": loss}
-
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
@@ -353,7 +327,6 @@ class SetCriterion(nn.Module):
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
             'masks': self.loss_masks,
-            'objectness': self.loss_objectness,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -423,9 +396,8 @@ class SetCriterion(nn.Module):
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    def __init__(self, owod_baseline="vanilla_d_detr", unknown_threshold=0.5):
+    def __init__(self, unknown_threshold=0.5):
         super().__init__()
-        self.owod_baseline = normalize_baseline(owod_baseline)
         self.unknown_threshold = float(unknown_threshold)
 
     @torch.no_grad()
@@ -443,7 +415,7 @@ class PostProcess(nn.Module):
         assert target_sizes.shape[1] == 2
 
         prob = out_logits.sigmoid()
-        unknown = unknown_score(outputs, self.owod_baseline)
+        unknown = unknown_score(outputs)
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
@@ -505,16 +477,12 @@ def build(args):
         aux_loss=args.aux_loss,
         with_box_refine=args.with_box_refine,
         two_stage=args.two_stage,
-        owod_baseline=getattr(args, 'owod_baseline', 'vanilla_d_detr'),
     )
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
-    owod_baseline = normalize_baseline(getattr(args, 'owod_baseline', 'vanilla_d_detr'))
-    if baseline_config(owod_baseline).has_objectness_head:
-        weight_dict['loss_objectness'] = getattr(args, 'objectness_loss_coef', 1.0)
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
@@ -527,18 +495,14 @@ def build(args):
         weight_dict.update(aux_weight_dict)
 
     losses = ['labels', 'boxes', 'cardinality']
-    if baseline_config(owod_baseline).has_objectness_head:
-        losses.append('objectness')
     if args.masks:
         losses += ["masks"]
     # num_classes, matcher, weight_dict, losses, focal_alpha=0.25
     criterion = SetCriterion(num_classes, matcher, weight_dict, losses,
-                             focal_alpha=args.focal_alpha,
-                             owod_baseline=owod_baseline,
-                             objectness_loss_coef=getattr(args, 'objectness_loss_coef', 1.0))
+                             focal_alpha=args.focal_alpha)
     criterion.to(device)
-    postprocessors = {'bbox': PostProcess(owod_baseline=owod_baseline,
-                                          unknown_threshold=getattr(args, 'unknown_threshold', 0.5))}
+    postprocessors = {'bbox': PostProcess(
+        unknown_threshold=getattr(args, 'unknown_threshold', 0.5))}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
         if args.dataset_file == "coco_panoptic":

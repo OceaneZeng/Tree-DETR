@@ -2,20 +2,26 @@
 
 ## Current OWOD-GNN workflow
 
-The active research path extends Deformable DETR for open-world object
-detection (OWOD) with an empirically supervised class-interference GNN. The GNN
-ranks previous classes by predicted interference from the current task, and the
-detector uses the selected local neighborhood for replay. Cosine similarity is
-kept only as an ablation.
+The active research path keeps Deformable DETR as the detector and adds an
+empirically supervised class-interference GNN. The experimental protocol and
+reporting follow the M-OWODB/S-OWODB pipeline used by DEUS (CVPR 2026). The GNN
+ranks previous classes by predicted interference from the current task and the
+detector replays the selected class neighborhood.
+
+The primary ablation removes one GNN component at a time: the node encoder,
+directed message passing, or pairwise ranking loss. Cosine similarity is not a
+component ablation.
 
 The primary entry points are:
 
-- `tools/owod/build_protocol.py`: build S-OWODB or M-OWODB stage annotations.
-- `tools/owod/run_baseline.py`: train and evaluate external OWOD baselines.
+- `tools/owod/prepare_protocol.py`: validate and register official OWOD stage annotations.
+- `tools/owod/run_detector_control.py`: run the local Deformable DETR control.
 - `tools/owod/calibrate_interference_gnn.py`: train the interference GNN from
   measured detector harm on an earlier stage.
 - `tools/owod/run_graph_local_increment.py`: run GNN-selected incremental
   replay and detector training.
+- `tools/owod/table1_reference.py`: inspect the external baselines transcribed
+  from DEUS Table 1.
 
 See [`tools/owod/README.md`](tools/owod/README.md) for reproducible commands.
 Each detector experiment keeps `train.log`, `metrics.jsonl`, `run_config.json`,

@@ -12,10 +12,7 @@ def main() -> int:
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     if root not in sys.path:
         sys.path.insert(0, root)
-    modules = [
-        importlib.import_module("models.graph_local.tests.test_preflight"),
-        importlib.import_module("models.graph_local.tests.test_gnn"),
-    ]
+    modules = [importlib.import_module("models.graph_local.tests.test_gnn")]
     failures = []
     test_names = []
     for module in modules:

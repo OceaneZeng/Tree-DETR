@@ -51,6 +51,20 @@ def compress_gradient_sketches(
     return class_ids, F.normalize(pooled, dim=1, eps=1e-8)
 
 
+class FixedNodeProjection(nn.Module):
+    """Parameter-free dimensionality match for the node-encoder ablation."""
+
+    def __init__(self, output_dim: int):
+        super().__init__()
+        self.output_dim = int(output_dim)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        if features.shape[-1] == self.output_dim:
+            return features
+        return F.adaptive_avg_pool1d(
+            features.unsqueeze(1), self.output_dim).squeeze(1)
+
+
 class ClassInterferenceGNN(nn.Module):
     """A small dense directed GNN for ordered class-pair harm prediction.
 
@@ -64,7 +78,8 @@ class ClassInterferenceGNN(nn.Module):
     format_version = 1
 
     def __init__(self, input_dim: int, hidden_dim: int = 64,
-                 message_steps: int = 2, dropout: float = 0.0):
+                 message_steps: int = 2, dropout: float = 0.0,
+                 use_node_encoder: bool = True):
         super().__init__()
         if input_dim <= 0 or hidden_dim <= 0:
             raise ValueError("input_dim and hidden_dim must be positive")
@@ -74,28 +89,33 @@ class ClassInterferenceGNN(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.message_steps = int(message_steps)
         self.dropout_probability = float(dropout)
-        self.input_projection = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
-            nn.GELU(),
+        self.use_node_encoder = bool(use_node_encoder)
+        self.node_dim = self.hidden_dim
+        self.input_projection = (
+            nn.Sequential(
+                nn.Linear(self.input_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.GELU(),
+            )
+            if self.use_node_encoder else FixedNodeProjection(self.hidden_dim)
         )
         self.message_edges = nn.ModuleList([
             self._edge_mlp() for _ in range(self.message_steps)
         ])
         self.message_updates = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(2 * self.hidden_dim, self.hidden_dim),
+                nn.Linear(2 * self.node_dim, self.hidden_dim),
                 nn.LayerNorm(self.hidden_dim),
                 nn.GELU(),
                 nn.Dropout(self.dropout_probability),
-                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.Linear(self.hidden_dim, self.node_dim),
             ) for _ in range(self.message_steps)
         ])
         self.final_edge = self._edge_mlp()
 
     def _edge_mlp(self) -> nn.Sequential:
         return nn.Sequential(
-            nn.Linear(3 * self.hidden_dim, self.hidden_dim),
+            nn.Linear(3 * self.node_dim, self.hidden_dim),
             nn.LayerNorm(self.hidden_dim),
             nn.GELU(),
             nn.Dropout(self.dropout_probability),
@@ -165,6 +185,7 @@ class ClassInterferenceGNN(nn.Module):
             "hidden_dim": self.hidden_dim,
             "message_steps": self.message_steps,
             "dropout": self.dropout_probability,
+            "use_node_encoder": self.use_node_encoder,
         }
 
 
@@ -241,7 +262,9 @@ def select_gnn_neighbors(class_ids: Sequence[int], edge_prob: torch.Tensor,
 def fit_interference_gnn(model: ClassInterferenceGNN,
                          stages: Sequence[Mapping[str, torch.Tensor]],
                          epochs: int = 200, lr: float = 1e-3,
-                         weight_decay: float = 1e-4, grad_clip: float = 1.0
+                         weight_decay: float = 1e-4, grad_clip: float = 1.0,
+                         ranking_margin: float = 0.25,
+                         ranking_weight: float = 1.0
                          ) -> List[float]:
     """Fit on historical stage artifacts and return mean loss per epoch."""
     if not stages:
@@ -261,7 +284,9 @@ def fit_interference_gnn(model: ClassInterferenceGNN,
             if valid_mask is not None:
                 valid_mask = valid_mask.to(device)
             output = model(features)
-            loss = harm_prediction_loss(output["edge_logits"], harm, valid_mask)
+            loss = harm_prediction_loss(
+                output["edge_logits"], harm, valid_mask,
+                ranking_margin=ranking_margin, ranking_weight=ranking_weight)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite GNN harm-prediction loss")
             optimizer.zero_grad(set_to_none=True)

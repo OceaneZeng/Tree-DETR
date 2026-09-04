@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "source": {
+    "title": "Detecting Unknown Objects via Energy-based Separation for Open World Object Detection",
+    "authors": "Jun-Woo Heo, Keonhee Park, Gyeong-Moon Park",
+    "venue": "CVPR 2026",
+    "table": 1,
+    "pdf_page": 7
+  },
+  "metric_unit": "percent",
+  "metric_note": "The paper labels the known metric mAP; values follow the standard OWOD AP at IoU 0.5 reporting convention.",
+  "protocols": {
+    "m-owodb": {
+      "note": "Daggered rows were reproduced after correcting the M-OWODB annotation duplication bug identified by O1O.",
+      "methods": {
+        "ORE": {"citation": 10, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 56.0, "u_rec": 4.9, "h_score": 9.0},
+          {"task": 2, "previous_map": 52.7, "current_map": 26.0, "known_map": 39.4, "u_rec": 2.9, "h_score": 5.4},
+          {"task": 3, "previous_map": 38.2, "current_map": 12.7, "known_map": 29.7, "u_rec": 3.9, "h_score": 6.9},
+          {"task": 4, "previous_map": 29.6, "current_map": 12.4, "known_map": 25.3}
+        ]},
+        "OW-DETR": {"citation": 7, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 59.2, "u_rec": 7.5, "h_score": 13.3},
+          {"task": 2, "previous_map": 53.6, "current_map": 33.5, "known_map": 42.9, "u_rec": 6.2, "h_score": 10.8},
+          {"task": 3, "previous_map": 38.3, "current_map": 15.8, "known_map": 30.8, "u_rec": 5.7, "h_score": 9.6},
+          {"task": 4, "previous_map": 31.4, "current_map": 17.1, "known_map": 27.8}
+        ]},
+        "CAT": {"citation": 15, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 60.0, "u_rec": 23.7, "h_score": 34.0},
+          {"task": 2, "previous_map": 55.5, "current_map": 32.7, "known_map": 44.1, "u_rec": 19.1, "h_score": 26.7},
+          {"task": 3, "previous_map": 42.8, "current_map": 18.7, "known_map": 34.8, "u_rec": 24.4, "h_score": 28.7},
+          {"task": 4, "previous_map": 34.4, "current_map": 16.6, "known_map": 29.9}
+        ]},
+        "PROB": {"citation": 30, "dagger": true, "tasks": [
+          {"task": 1, "current_map": 66.4, "u_rec": 28.3, "h_score": 39.7},
+          {"task": 2, "previous_map": 62.6, "current_map": 39.2, "known_map": 50.9, "u_rec": 26.4, "h_score": 34.8},
+          {"task": 3, "previous_map": 49.6, "current_map": 33.5, "known_map": 44.2, "u_rec": 29.3, "h_score": 35.2},
+          {"task": 4, "previous_map": 44.0, "current_map": 26.5, "known_map": 39.7}
+        ]},
+        "OrthogonalDet": {"citation": 25, "dagger": true, "tasks": [
+          {"task": 1, "current_map": 65.1, "u_rec": 36.3, "h_score": 46.6},
+          {"task": 2, "previous_map": 58.2, "current_map": 44.2, "known_map": 51.2, "u_rec": 30.2, "h_score": 38.0},
+          {"task": 3, "previous_map": 50.9, "current_map": 40.1, "known_map": 47.3, "u_rec": 28.7, "h_score": 35.7},
+          {"task": 4, "previous_map": 49.1, "current_map": 31.5, "known_map": 44.7}
+        ]},
+        "O1O": {"citation": 28, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 65.1, "u_rec": 49.3, "h_score": 56.1},
+          {"task": 2, "previous_map": 61.0, "current_map": 45.0, "known_map": 53.0, "u_rec": 50.3, "h_score": 51.6},
+          {"task": 3, "previous_map": 50.0, "current_map": 36.5, "known_map": 45.5, "u_rec": 49.5, "h_score": 47.4},
+          {"task": 4, "previous_map": 46.2, "current_map": 31.0, "known_map": 42.4}
+        ]},
+        "OWOBJ": {"citation": 29, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 61.4, "u_rec": 23.6, "h_score": 34.1},
+          {"task": 2, "previous_map": 58.4, "current_map": 34.4, "known_map": 45.7, "u_rec": 23.8, "h_score": 31.3},
+          {"task": 3, "previous_map": 44.8, "current_map": 27.8, "known_map": 38.8, "u_rec": 25.1, "h_score": 30.5},
+          {"task": 4, "previous_map": 36.4, "current_map": 20.7, "known_map": 32.0}
+        ]},
+        "DEUS": {"citation": null, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 66.2, "u_rec": 65.1, "h_score": 65.6},
+          {"task": 2, "previous_map": 61.0, "current_map": 45.7, "known_map": 53.3, "u_rec": 66.2, "h_score": 59.0},
+          {"task": 3, "previous_map": 53.4, "current_map": 43.3, "known_map": 50.1, "u_rec": 69.0, "h_score": 58.0},
+          {"task": 4, "previous_map": 50.5, "current_map": 32.8, "known_map": 46.0}
+        ]}
+      }
+    },
+    "s-owodb": {
+      "note": "Rows are transcribed directly from the lower half of Table 1.",
+      "methods": {
+        "ORE": {"citation": 10, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 61.4, "u_rec": 1.5, "h_score": 2.9},
+          {"task": 2, "previous_map": 56.5, "current_map": 26.1, "known_map": 40.6, "u_rec": 3.9, "h_score": 7.1},
+          {"task": 3, "previous_map": 38.7, "current_map": 23.7, "known_map": 33.7, "u_rec": 3.6, "h_score": 6.5},
+          {"task": 4, "previous_map": 33.6, "current_map": 26.3, "known_map": 31.8}
+        ]},
+        "OW-DETR": {"citation": 7, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 71.5, "u_rec": 5.7, "h_score": 10.6},
+          {"task": 2, "previous_map": 62.8, "current_map": 27.5, "known_map": 43.8, "u_rec": 6.2, "h_score": 10.9},
+          {"task": 3, "previous_map": 45.2, "current_map": 24.9, "known_map": 38.5, "u_rec": 6.9, "h_score": 11.7},
+          {"task": 4, "previous_map": 38.2, "current_map": 28.1, "known_map": 33.1}
+        ]},
+        "CAT": {"citation": 15, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 74.2, "u_rec": 24.0, "h_score": 36.3},
+          {"task": 2, "previous_map": 67.6, "current_map": 35.5, "known_map": 50.7, "u_rec": 23.0, "h_score": 31.6},
+          {"task": 3, "previous_map": 51.2, "current_map": 32.6, "known_map": 45.0, "u_rec": 24.6, "h_score": 31.8},
+          {"task": 4, "previous_map": 45.4, "current_map": 35.1, "known_map": 42.8}
+        ]},
+        "PROB": {"citation": 30, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 73.4, "u_rec": 17.6, "h_score": 28.4},
+          {"task": 2, "previous_map": 66.3, "current_map": 36.0, "known_map": 50.4, "u_rec": 22.3, "h_score": 30.9},
+          {"task": 3, "previous_map": 47.8, "current_map": 30.4, "known_map": 42.0, "u_rec": 24.8, "h_score": 31.2},
+          {"task": 4, "previous_map": 42.6, "current_map": 31.7, "known_map": 39.9}
+        ]},
+        "OrthogonalDet": {"citation": 25, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 71.6, "u_rec": 24.6, "h_score": 36.6},
+          {"task": 2, "previous_map": 64.0, "current_map": 39.9, "known_map": 51.3, "u_rec": 27.9, "h_score": 36.1},
+          {"task": 3, "previous_map": 52.1, "current_map": 42.2, "known_map": 48.8, "u_rec": 31.9, "h_score": 38.6},
+          {"task": 4, "previous_map": 48.7, "current_map": 38.8, "known_map": 46.2}
+        ]},
+        "O1O": {"citation": 28, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 72.6, "u_rec": 49.8, "h_score": 59.1},
+          {"task": 2, "previous_map": 65.3, "current_map": 44.9, "known_map": 54.6, "u_rec": 51.1, "h_score": 52.8},
+          {"task": 3, "previous_map": 49.5, "current_map": 41.5, "known_map": 46.8, "u_rec": 48.1, "h_score": 47.4},
+          {"task": 4, "previous_map": 47.3, "current_map": 42.0, "known_map": 45.9}
+        ]},
+        "OWOBJ": {"citation": 29, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 76.2, "u_rec": 22.3, "h_score": 34.5},
+          {"task": 2, "previous_map": 69.8, "current_map": 41.0, "known_map": 54.8, "u_rec": 28.7, "h_score": 37.7},
+          {"task": 3, "previous_map": 50.6, "current_map": 35.7, "known_map": 46.8, "u_rec": 30.9, "h_score": 37.2},
+          {"task": 4, "previous_map": 46.7, "current_map": 36.9, "known_map": 43.2}
+        ]},
+        "DEUS": {"citation": null, "dagger": false, "tasks": [
+          {"task": 1, "current_map": 71.6, "u_rec": 68.7, "h_score": 70.1},
+          {"task": 2, "previous_map": 63.5, "current_map": 43.0, "known_map": 52.7, "u_rec": 62.9, "h_score": 57.4},
+          {"task": 3, "previous_map": 53.6, "current_map": 45.4, "known_map": 50.9, "u_rec": 60.7, "h_score": 55.4},
+          {"task": 4, "previous_map": 50.7, "current_map": 42.8, "known_map": 48.8}
+        ]}
+      }
+    }
+  }
+}

@@ -21,48 +21,27 @@ import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
-from models.graph_local.pseudo_labels import complete_targets_with_teacher
-from models.owod_metrics import compute_owod_metrics
+from models.owod_metrics import compute_owod_metrics, harmonic_score, table1_summary
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    teacher: torch.nn.Module | None = None,
-                    teacher_old_class_ids: Iterable[int] | None = None,
-                    teacher_score_threshold: float = 0.5,
-                    teacher_duplicate_iou: float = 0.7,
-                    teacher_ground_truth_iou: float = 0.5,
-                    teacher_max_per_image: int = 20,
                     print_freq: int = 100):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(
         delimiter="  ",
         visible_meters={"lr", "class_error", "grad_norm", "loss", "loss_ce",
-                        "loss_bbox", "loss_giou", "loss_objectness", "pseudo_labels"})
+                        "loss_bbox", "loss_giou"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
     prefetcher = data_prefetcher(data_loader, device, prefetch=True)
     samples, targets = prefetcher.next()
-    pseudo_total = 0
-
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for _ in metric_logger.log_every(range(len(data_loader)), max(1, int(print_freq)), header):
-        if teacher is not None:
-            targets, pseudo_counts = complete_targets_with_teacher(
-                teacher,
-                samples,
-                targets,
-                old_class_ids=teacher_old_class_ids,
-                score_threshold=teacher_score_threshold,
-                duplicate_iou=teacher_duplicate_iou,
-                ground_truth_iou=teacher_ground_truth_iou,
-                max_per_image=teacher_max_per_image,
-            )
-            pseudo_total += sum(pseudo_counts)
         outputs = model(samples)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
@@ -95,9 +74,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
-        if teacher is not None:
-            metric_logger.update(pseudo_labels=pseudo_total / max(1, _ + 1))
-
         samples, targets = prefetcher.next()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -134,8 +110,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
     metric_logger = utils.MetricLogger(
         delimiter=" ",
-        visible_meters={"class_error", "loss", "loss_ce", "loss_bbox", "loss_giou",
-                        "loss_objectness"})
+        visible_meters={"class_error", "loss", "loss_ce", "loss_bbox", "loss_giou"})
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Test:'
     owod_predictions = []
@@ -215,6 +190,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     if panoptic_evaluator is not None:
         panoptic_res = panoptic_evaluator.summarize()
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    class_ap50 = {}
     if coco_evaluator is not None:
         if 'bbox' in postprocessors.keys():
             stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
@@ -250,4 +226,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         stats.update({f'owod_{key.lower().replace("-", "_")}': value
                       for key, value in owod_stats.items()})
         print("OWOD metrics:", owod_stats)
+        if class_ap50:
+            if owod_stats["unknown_gt"] > 0:
+                stats["owod_h_score"] = harmonic_score(
+                    class_ap50.get("Known", class_ap50.get("Current", 0.0)),
+                    owod_stats["U-Recall"])
+            print("OWOD Table 1 (%):", table1_summary(class_ap50, owod_stats))
     return stats, coco_evaluator

@@ -6,8 +6,7 @@ main method extracts decoder gradient sketches for current and previous
 classes, predicts directed new-to-old interference with a GNN calibrated on
 an earlier stage, and turns the selected old classes into a replay annotation.
 The actual detector training/evaluation is delegated to ``main.py`` so the
-standard OWOD objectness and full-label metrics are kept.  Prototype cosine is
-retained only as an ablation.
+standard full-label OWOD metrics are kept.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from pathlib import Path
 from typing import Mapping
 
 import torch
-import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -35,6 +33,7 @@ from models.graph_local.replay import build_increment_annotation
 from tools.owod.gnn_calibration import (build_calibration_dataset,
                                         compute_gradient_sketches,
                                         load_detector)
+from tools.owod.protocol import stage_files
 from util.experiment_log import prepare_log_file
 
 
@@ -58,7 +57,6 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", default=None, type=Path,
                         help="incomplete current-stage checkpoint; restores optimizer and epoch")
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--owod-baseline", default="vanilla_d_detr")
     parser.add_argument("--num-classes", default=91, type=int)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--batch-size", default=2, type=int)
@@ -67,9 +65,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--nproc-per-node", default=2, type=int)
     parser.add_argument("--master-port", default=29561, type=int)
-    parser.add_argument("--graph-estimator", choices=("cosine", "gnn"), default="gnn",
-                        help="GNN is the main method; cosine is a prototype ablation")
-    parser.add_argument("--gnn-checkpoint", default="", type=Path)
+    parser.add_argument("--gnn-checkpoint", default=None, type=Path,
+                        help="required for the graph arm; random/global are matched controls")
     parser.add_argument("--graph-k", default=5, type=int)
     parser.add_argument("--gnn-min-score", default=0.0, type=float)
     parser.add_argument("--graph-feature-device", default="cuda:0",
@@ -77,7 +74,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sketch-max-images", default=12, type=int)
     parser.add_argument("--sketch-batch-size", default=1, type=int)
     parser.add_argument("--last-decoder-layers", default=2, type=int)
-    parser.add_argument("--replay-budget", default=256, type=int)
+    parser.add_argument("--exemplars-per-class", default=None, type=int,
+                        help="required for incremental tasks; use the value from the official protocol")
     parser.add_argument("--control", choices=("graph", "random", "global"), default="graph")
     parser.add_argument("--eval-interval", default=5, type=int)
     parser.add_argument("--print-freq", default=100, type=int)
@@ -89,53 +87,6 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
-
-
-def load_state(path: Path) -> Mapping[str, torch.Tensor]:
-    # Older project checkpoints contain an argparse.Namespace alongside the
-    # tensors; allow that harmless metadata while still using weights_only.
-    safe_globals = getattr(torch.serialization, "safe_globals", None)
-    if safe_globals is None:
-        # PyTorch 2.4 has no safe_globals. This is an explicitly supplied
-        # local checkpoint, matching main.load_local_checkpoint behaviour.
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-    else:
-        with safe_globals([argparse.Namespace]):
-            payload = torch.load(path, map_location="cpu", weights_only=True)
-    state = payload.get("model", payload) if isinstance(payload, Mapping) else payload
-    if not isinstance(state, Mapping):
-        raise ValueError(f"checkpoint is not a state dict: {path}")
-    return state
-
-
-def classifier_features(checkpoint: Path, class_ids: list[int]) -> dict[int, torch.Tensor]:
-    state = load_state(checkpoint)
-    key = next((name for name in state
-                if name.endswith("class_embed.0.weight")), None)
-    if key is None:
-        raise KeyError("checkpoint has no class_embed.0.weight; cannot build class graph")
-    weights = state[key].float()
-    if max(class_ids) >= weights.shape[0]:
-        raise ValueError(f"checkpoint classifier has {weights.shape[0]} rows, needs {max(class_ids) + 1}")
-    return {class_id: weights[class_id].reshape(-1).cpu() for class_id in class_ids}
-
-
-def build_prototype_similarity_matrix(features: dict[int, torch.Tensor]
-                                      ) -> tuple[list[int], torch.Tensor]:
-    """Return positive cosine similarity for classifier prototypes.
-
-    Classifier weights are class prototypes, not gradient sketches. Similar
-    prototype directions indicate greater confusion risk; negative cosine is
-    reserved for actual gradient-conflict measurements.
-    """
-    if len(features) < 2:
-        raise ValueError("At least two class prototypes are required")
-    class_ids = sorted(int(class_id) for class_id in features)
-    rows = torch.stack([features[class_id].float().cpu() for class_id in class_ids])
-    rows = F.normalize(rows, dim=1, eps=1e-12)
-    similarity = torch.clamp(rows @ rows.t(), min=0.0)
-    similarity.fill_diagonal_(0.0)
-    return class_ids, similarity
 
 
 def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
@@ -191,17 +142,6 @@ def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int]
                      old_ids: list[int]) -> tuple[list[int], dict]:
     if not old_ids or not new_ids or args.control == "global":
         return (list(old_ids) if args.control == "global" else []), {"estimator": "none"}
-    if args.graph_estimator == "cosine":
-        class_ids, similarity = build_prototype_similarity_matrix(features)
-        selected, details = rank_stage_old_classes(
-            class_ids, similarity, new_ids, old_ids, args.graph_k, 0.0)
-        return selected, {
-            "estimator": "classifier_prototype_cosine_similarity",
-            "score_semantics": "max_positive_cosine_similarity",
-            **details,
-        }
-    if not args.gnn_checkpoint:
-        raise ValueError("--gnn-checkpoint is required for --graph-estimator gnn")
     gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
     if metadata.get("supervision") != "empirical_train_loss_increase":
         raise ValueError(
@@ -234,7 +174,6 @@ def detector_gradient_features(args, current_ann: Path, replay_ann: Path,
     detector_args = get_args_parser().parse_args([])
     detector_args.device = args.graph_feature_device
     detector_args.num_classes = args.num_classes
-    detector_args.owod_baseline = args.owod_baseline
     detector_args.coco_path = str(args.coco_path)
     detector_args.dataset_file = "coco"
     detector_args.masks = False
@@ -278,33 +217,13 @@ def random_neighbors(old_ids: list[int], graph_k: int, seed: int) -> list[int]:
     return sorted(rng.sample(old_ids, min(len(old_ids), max(0, graph_k))))
 
 
-def stage_paths(manifest_path: Path, stage: int, coco_path: Path) -> tuple[dict, Path, Path, Path]:
-    manifest = read_json(manifest_path)
-    stages = manifest.get("stages", [])
-    if stage < 0 or stage >= len(stages):
-        raise ValueError(f"stage {stage} is outside manifest [0, {len(stages)})")
-    root = manifest_path.parent
-    record = stages[stage]
-    stage_dir = root / f"stage_{stage}"
-    current = stage_dir / "instances_increment_train2017.json"
-    if not current.is_file():
-        current = stage_dir / "instances_increment_only_train2017.json"
-    # Replay must come from data retained before the current increment. Using
-    # the current stage's seen annotation would select many current images and
-    # can duplicate their annotations when the increment is assembled.
-    replay_stage_dir = root / f"stage_{max(0, stage - 1)}"
-    replay_pool = replay_stage_dir / "instances_train2017.json"
-    val = stage_dir / "instances_val2017_full.json"
-    if not val.is_file():
-        val = stage_dir / "instances_val2017.json"
-    if not val.is_file():
-        # IOD-style manifests may not materialize a full-label file.  The
-        # source COCO validation annotation is the correct OWOD fallback.
-        val = coco_path / "annotations" / "instances_val2017.json"
-    for path in (current, replay_pool, val):
-        if not path.is_file():
-            raise FileNotFoundError(f"manifest stage file is missing: {path}")
-    return manifest, current, replay_pool, val
+def stage_paths(manifest_path: Path, stage: int, coco_path: Path
+                ) -> tuple[dict, Path, Path, Path]:
+    del coco_path  # image root is unrelated to annotation provenance
+    manifest, current_files = stage_files(manifest_path, stage)
+    _prior_manifest, replay_files = stage_files(manifest_path, max(0, stage - 1))
+    return (manifest, current_files["increment_train"], replay_files["train"],
+            current_files["full_val"])
 
 
 def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
@@ -314,7 +233,8 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--output_dir", str(arm_dir), "--num_classes", str(args.num_classes),
             "--epochs", str(args.epochs), "--batch_size", str(args.batch_size),
             "--num_workers", str(args.num_workers), "--seed", str(args.seed),
-            "--device", "cuda", "--owod-baseline", args.owod_baseline,
+            "--device", "cuda",
+            "--owod-manifest", str(args.manifest), "--owod-stage", str(args.stage),
             "--owod-known-class-ids", *[str(value) for value in active_ids],
             "--owod-current-class-ids", *[str(value) for value in active_ids if value not in set(old_ids)],
             "--unknown-threshold", str(args.unknown_threshold),
@@ -325,8 +245,8 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
     if old_ids:
         main += ["--owod-previous-class-ids", *[str(value) for value in old_ids]]
     if args.resume:
-        # main.py loads --pretrained first to construct the frozen teacher,
-        # then --resume restores the current-stage detector/optimizer state.
+        # Load the completed previous-stage model before restoring the current
+        # stage optimizer/scheduler state.
         if args.stage > 0 and old_ids:
             main += ["--pretrained", str(args.checkpoint)]
         main += ["--resume", str(args.resume)]
@@ -340,9 +260,6 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
         main.append("--no-random-crop")
     if args.skip_eval:
         main.append("--skip-eval")
-    if args.stage > 0 and old_ids:
-        main += ["--teacher-completion", "--teacher-old-class-ids",
-                 *[str(value) for value in old_ids]]
     if args.nproc_per_node > 1:
         return [sys.executable, "-m", "torch.distributed.run", "--standalone",
                 "--nproc_per_node", str(args.nproc_per_node), "--master_port",
@@ -426,26 +343,26 @@ def main() -> int:
                           "seed": args.seed}
         else:
             print(f"Loading graph features from {args.checkpoint}", flush=True)
-            if args.graph_estimator == "gnn":
-                if not args.gnn_checkpoint or not args.gnn_checkpoint.is_file():
-                    raise SystemExit(f"missing GNN checkpoint: {args.gnn_checkpoint}")
-                features, feature_info = detector_gradient_features(
-                    args, current_ann, replay_ann, new_ids, old_ids)
-            else:
-                all_ids = [int(value) for value in manifest["category_order_source_ids"]]
-                features = classifier_features(args.checkpoint, all_ids)
-                feature_info = {"feature_source": "checkpoint_classifier_prototypes"}
+            if args.gnn_checkpoint is None or not args.gnn_checkpoint.is_file():
+                raise SystemExit(f"missing GNN checkpoint: {args.gnn_checkpoint}")
+            features, feature_info = detector_gradient_features(
+                args, current_ann, replay_ann, new_ids, old_ids)
             selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
         if args.stage == 0 or not selected:
             train_ann = current_ann if args.stage > 0 else replay_ann
             replay_info = {"replay_classes": selected, "replay_images": 0,
                            "total_images": len(read_json(train_ann).get("images", []))}
         else:
+            if args.exemplars_per_class is None or args.exemplars_per_class <= 0:
+                raise SystemExit(
+                    "incremental replay requires --exemplars-per-class from the official "
+                    "OWOD recipe; no paper value is assumed")
             train_ann = annotation_dir / f"train_{args.control}.json"
             replay_info = build_increment_annotation(
-                current_ann, replay_ann, selected, args.replay_budget, train_ann, args.seed)
+                current_ann, replay_ann, selected, args.exemplars_per_class,
+                train_ann, args.seed)
 
-        if args.graph_estimator == "gnn" and features is not None:
+        if features is not None:
             gnn, _metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
             graph_class_ids, graph_features = compress_gradient_sketches(
                 features, output_dim=gnn.input_dim)
@@ -469,7 +386,8 @@ def main() -> int:
     metadata = {"runner": "tools/owod/run_graph_local_increment.py", "stage": args.stage,
                 "new_classes": new_ids, "old_classes": old_ids,
                 "active_classes": active_ids, "selected_replay_classes": selected,
-                "graph_estimator": args.graph_estimator, "control": args.control,
+                "graph_estimator": "gnn" if args.control == "graph" else "none",
+                "exemplars_per_class": args.exemplars_per_class,
                 "checkpoint": str(args.checkpoint),
                 "resume": str(args.resume) if args.resume else "",
                 "command": command}

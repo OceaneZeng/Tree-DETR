@@ -29,7 +29,7 @@ from util.checkpoint import matching_state_dict
 from util.experiment_log import (archive_log_file, experiment_log_path,
                                  prepare_log_file, start_file_logging,
                                  stop_file_logging)
-from models.owod_baselines import BASELINES, baseline_config_dict, normalize_baseline
+from models.owod_detector import detector_profile_dict
 
 
 def load_local_checkpoint(path):
@@ -67,17 +67,12 @@ def get_args_parser():
     parser.add_argument('--with_tree', action='store_true',
                         help='Enable the experimental Tree-DETR EE-0 flat-tree losses and adapters')
 
-    parser.add_argument('--owod-baseline', default='vanilla_d_detr',
-                        choices=sorted(BASELINES),
-                        help='OWOD protocol baseline: vanilla_d_detr, ore_star, ow_detr, prob, or oracle')
     parser.add_argument('--owod-manifest', default='',
                         help='S-OWODB/M-OWODB split manifest used for this run')
     parser.add_argument('--owod-stage', default=None, type=int,
                         help='Stage index in --owod-manifest, recorded in run metadata')
     parser.add_argument('--unknown-threshold', default=0.5, type=float,
                         help='Threshold used to mark post-processed predictions as unknown')
-    parser.add_argument('--objectness-loss-coef', default=1.0, type=float,
-                        help='Loss coefficient for OW-DETR/PROB foreground objectness')
     parser.add_argument('--owod-known-class-ids', type=int, nargs='+', default=None,
                         help='Known category IDs for U-Recall/A-OSE/WI evaluation on full labels')
     parser.add_argument('--owod-previous-class-ids', type=int, nargs='+', default=None,
@@ -185,14 +180,6 @@ def get_args_parser():
     parser.add_argument('--no-random-crop', action='store_true',
                         help='Keep flips and multi-scale resize but disable the COCO random-crop branch')
 
-    parser.add_argument('--teacher-completion', action='store_true',
-                        help='Complete current targets with confident frozen-teacher old-class boxes')
-    parser.add_argument('--teacher-old-class-ids', type=int, nargs='+', default=None,
-                        help='Classifier row IDs eligible for teacher completion; required with --teacher-completion')
-    parser.add_argument('--teacher-score-threshold', default=0.5, type=float)
-    parser.add_argument('--teacher-duplicate-iou', default=0.7, type=float)
-    parser.add_argument('--teacher-ground-truth-iou', default=0.5, type=float)
-    parser.add_argument('--teacher-max-per-image', default=20, type=int)
     parser.add_argument('--log-file', default='', type=str,
                         help='Human-readable log; relative paths are placed under output_dir')
     parser.add_argument('--no-file-log', action='store_true',
@@ -204,10 +191,9 @@ def get_args_parser():
 def main(args):
     utils.init_distributed_mode(args)
     file_log_state = start_file_logging(args, utils.is_main_process())
-    args.owod_baseline = normalize_baseline(args.owod_baseline)
     if utils.is_main_process() and args.output_dir:
         run_config = vars(args).copy()
-        run_config.update({'owod_baseline_config': baseline_config_dict(args.owod_baseline)})
+        run_config.update({'owod_detector_profile': detector_profile_dict()})
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         history_path = Path(args.output_dir) / 'run_history' / f'{run_id}.json'
@@ -215,7 +201,7 @@ def main(args):
         for config_path in (Path(args.output_dir) / 'run_config.json', history_path):
             with config_path.open('w', encoding='utf-8') as handle:
                 json.dump(run_config, handle, indent=2, sort_keys=True, default=str)
-        print('OWOD baseline:', json.dumps(baseline_config_dict(args.owod_baseline), sort_keys=True))
+        print('OWOD detector profile:', json.dumps(detector_profile_dict(), sort_keys=True))
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
@@ -245,7 +231,6 @@ def main(args):
     criterion.to(device)
 
     model_without_ddp = model
-    teacher_model = None
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
@@ -330,8 +315,6 @@ def main(args):
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
-    if args.teacher_completion and not args.pretrained:
-        raise ValueError('--teacher-completion requires --pretrained so the base teacher is explicit')
     if args.pretrained:
         checkpoint = load_local_checkpoint(args.pretrained)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
@@ -350,17 +333,6 @@ def main(args):
         if unexpected_keys:
             print('Unexpected Keys: {}'.format(unexpected_keys))
 
-        if args.teacher_completion:
-            if args.teacher_old_class_ids is None:
-                raise ValueError('--teacher-completion requires --teacher-old-class-ids')
-            if not args.teacher_old_class_ids:
-                raise ValueError('--teacher-old-class-ids must not be empty')
-            teacher_model = copy.deepcopy(model_without_ddp).to(device)
-            teacher_model.eval()
-            for parameter in teacher_model.parameters():
-                parameter.requires_grad_(False)
-            print('Enabled frozen-teacher global label completion for {} old classes.'.format(
-                len(args.teacher_old_class_ids)))
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -439,12 +411,6 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm,
-            teacher=teacher_model,
-            teacher_old_class_ids=args.teacher_old_class_ids,
-            teacher_score_threshold=args.teacher_score_threshold,
-            teacher_duplicate_iou=args.teacher_duplicate_iou,
-            teacher_ground_truth_iou=args.teacher_ground_truth_iou,
-            teacher_max_per_image=args.teacher_max_per_image,
             print_freq=args.print_freq)
         lr_scheduler.step()
         if args.output_dir:

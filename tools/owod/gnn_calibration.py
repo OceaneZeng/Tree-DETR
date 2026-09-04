@@ -16,11 +16,20 @@ from torch.utils.data import DataLoader, Subset
 from datasets.coco import CocoDetection, make_coco_transforms
 from main import load_local_checkpoint
 from models import build_model
-from models.graph_local.interference import flatten_gradients
 from models.graph_local.lora import (freeze_for_class_ids, inject_decoder_lora,
                                      target_base_weights)
 from models.graph_local.losses import weighted_detection_loss
 import util.misc as utils
+
+
+def flatten_gradients(gradients: Iterable[torch.Tensor | None],
+                      parameters: Sequence[torch.Tensor]) -> torch.Tensor:
+    chunks = []
+    for gradient, parameter in zip(gradients, parameters):
+        chunks.append((torch.zeros_like(parameter) if gradient is None else gradient.detach()).reshape(-1))
+    if not chunks:
+        raise ValueError("No target gradients were provided")
+    return torch.cat(chunks)
 
 
 def atomic_torch_save(payload: object, path: Path) -> None:

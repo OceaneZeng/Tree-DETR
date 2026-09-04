@@ -23,47 +23,30 @@ def class_image_index(coco: Mapping) -> Dict[int, List[int]]:
     return {class_id: sorted(image_ids) for class_id, image_ids in index.items()}
 
 
-def select_replay_images(coco: Mapping, class_ids: Iterable[int], budget: int,
+def select_replay_images(coco: Mapping, class_ids: Iterable[int], exemplars_per_class: int,
                          seed: int = 42) -> List[int]:
-    """Round-robin class-balanced selection with a hard image budget."""
-    if budget <= 0:
+    """Select a deterministic exemplar quota independently for each class."""
+    if exemplars_per_class <= 0:
         return []
     rng = random.Random(seed)
     by_class = class_image_index(coco)
     classes = sorted({int(class_id) for class_id in class_ids})
-    candidates = {}
+    selected = set()
     for class_id in classes:
-        values = list(by_class.get(class_id, []))
-        rng.shuffle(values)
-        candidates[class_id] = values
-    selected = []
-    selected_set = set()
-    while len(selected) < budget:
-        made_progress = False
-        for class_id in classes:
-            while candidates[class_id] and candidates[class_id][0] in selected_set:
-                candidates[class_id].pop(0)
-            if not candidates[class_id]:
-                continue
-            image_id = candidates[class_id].pop(0)
-            selected.append(image_id)
-            selected_set.add(image_id)
-            made_progress = True
-            if len(selected) == budget:
-                break
-        if not made_progress:
-            break
-    return selected
+        candidates = list(by_class.get(class_id, []))
+        rng.shuffle(candidates)
+        selected.update(candidates[:exemplars_per_class])
+    return sorted(selected)
 
 
 def build_increment_annotation(new_annotations, base_annotations,
-                               replay_classes: Sequence[int], replay_budget: int,
+                               replay_classes: Sequence[int], exemplars_per_class: int,
                                output_path, seed: int = 42) -> Dict[str, object]:
     """Combine fully labeled new-class images with selected old exemplars."""
     new_coco = _load_coco(new_annotations)
     base_coco = _load_coco(base_annotations)
     replay_ids = set(select_replay_images(
-        base_coco, replay_classes, replay_budget, seed=seed,
+        base_coco, replay_classes, exemplars_per_class, seed=seed,
     ))
     replay_images = [image for image in base_coco.get("images", [])
                      if int(image["id"]) in replay_ids]
@@ -119,6 +102,7 @@ def build_increment_annotation(new_annotations, base_annotations,
             "new_images": len(new_coco.get("images", [])),
             "replay_images": len(replay_images),
             "replay_classes": [int(class_id) for class_id in replay_classes],
+            "exemplars_per_class": int(exemplars_per_class),
             "seed": int(seed),
         },
         "licenses": new_coco.get("licenses", base_coco.get("licenses", [])),
@@ -136,6 +120,11 @@ def build_increment_annotation(new_annotations, base_annotations,
         "replay_images": len(replay_images),
         "total_images": len(images),
         "replay_classes": [int(class_id) for class_id in replay_classes],
+        "exemplars_per_class": int(exemplars_per_class),
+        "selected_images_per_class": {
+            str(class_id): len(set(class_image_index(base_coco).get(int(class_id), [])) & replay_ids)
+            for class_id in replay_classes
+        },
         "replay_source": (str(base_annotations)
                           if not isinstance(base_annotations, Mapping) else "<in-memory>"),
     }

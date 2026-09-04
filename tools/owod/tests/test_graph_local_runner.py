@@ -9,9 +9,8 @@ import torch
 from engine import _coco_ap50_for_categories
 from models.graph_local.gnn import ClassInterferenceGNN, save_gnn_checkpoint
 from models.graph_local.replay import build_increment_annotation
-from tools.owod.calibrate_interference_gnn import source_masks
-from tools.owod.run_graph_local_increment import (build_prototype_similarity_matrix,
-                                                   random_neighbors,
+from tools.owod.calibrate_interference_gnn import resolve_gnn_ablation, source_masks
+from tools.owod.run_graph_local_increment import (random_neighbors,
                                                    get_parser,
                                                    rank_stage_old_classes,
                                                    select_neighbors,
@@ -36,35 +35,6 @@ def test_stage_ranking_only_selects_old_classes_and_treats_k_as_total():
     assert set(selected).issubset({1, 2})
 
 
-def test_cosine_selection_ranks_old_targets_before_top_k():
-    # The strongest per-source neighbor is another new class. The old bug took
-    # top-k first and then discarded that new class, returning no replay class.
-    features = {
-        1: torch.tensor([0.8, 0.6]),
-        2: torch.tensor([0.0, 1.0]),
-        10: torch.tensor([1.0, 0.0]),
-        11: torch.tensor([0.99, 0.1]),
-    }
-    args = SimpleNamespace(control="graph", graph_estimator="cosine", graph_k=1)
-
-    selected, details = select_neighbors(args, features, new_ids=[10, 11], old_ids=[1, 2])
-
-    assert selected == [1]
-    assert details["requested_k"] == 1
-    assert details["selected_k"] == 1
-
-
-def test_prototype_graph_uses_positive_similarity_not_negative_gradient_conflict():
-    class_ids, scores = build_prototype_similarity_matrix({
-        1: torch.tensor([1.0, 0.0]),
-        2: torch.tensor([0.8, 0.6]),
-        3: torch.tensor([-1.0, 0.0]),
-    })
-    index = {class_id: position for position, class_id in enumerate(class_ids)}
-    assert torch.isclose(scores[index[1], index[2]], torch.tensor(0.8))
-    assert scores[index[1], index[3]] == 0.0
-
-
 def test_random_control_can_match_graph_neighborhood_size():
     selected = random_neighbors([1, 2, 3, 4], graph_k=3, seed=42)
     assert len(selected) == 3
@@ -81,7 +51,24 @@ def test_resume_defaults_to_none_instead_of_current_directory():
         "--output-dir", "output",
     ])
     assert args.resume is None
-    assert args.graph_estimator == "gnn"
+    assert args.gnn_checkpoint is None
+
+
+def test_primary_ablations_disable_exactly_one_gnn_component():
+    base = {
+        "gnn_message_steps": 2,
+        "gnn_ranking_margin": 0.25,
+    }
+    expected = {
+        "full": (True, 2, 1.0),
+        "no_node_encoder": (False, 2, 1.0),
+        "no_message_passing": (True, 0, 1.0),
+        "no_ranking_loss": (True, 2, 0.0),
+    }
+    for name, values in expected.items():
+        config = resolve_gnn_ablation(SimpleNamespace(gnn_ablation=name, **base))
+        assert (config["use_node_encoder"], config["message_steps"],
+                config["ranking_weight"]) == values
 
 
 def test_gnn_checkpoint_must_have_empirical_harm_supervision():
@@ -90,7 +77,7 @@ def test_gnn_checkpoint_must_have_empirical_harm_supervision():
         save_gnn_checkpoint(ClassInterferenceGNN(input_dim=2), checkpoint,
                             extra={"supervision": "cosine_proxy"})
         args = SimpleNamespace(
-            control="graph", graph_estimator="gnn", graph_k=1,
+            control="graph", graph_k=1,
             gnn_checkpoint=checkpoint, gnn_min_score=0.0)
         try:
             select_neighbors(args, {
@@ -152,14 +139,30 @@ def test_stage_one_replay_pool_comes_from_previous_stage():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         manifest = root / "split_manifest.json"
-        manifest.write_text(json.dumps({"stages": [{}, {}]}), encoding="utf-8")
         (root / "stage_0").mkdir()
         (root / "stage_1").mkdir()
         previous = root / "stage_0" / "instances_train2017.json"
         current = root / "stage_1" / "instances_increment_train2017.json"
         validation = root / "stage_1" / "instances_val2017_full.json"
-        for path in (previous, current, validation):
+        stage0_increment = root / "stage_0" / "instances_increment_train2017.json"
+        stage0_known = root / "stage_0" / "instances_val2017.json"
+        stage0_full = root / "stage_0" / "instances_val2017_full.json"
+        stage1_train = root / "stage_1" / "instances_train2017.json"
+        stage1_known = root / "stage_1" / "instances_val2017.json"
+        for path in (previous, current, validation, stage0_increment, stage0_known,
+                     stage0_full, stage1_train, stage1_known):
             path.write_text("{}", encoding="utf-8")
+        records = []
+        for index, paths in enumerate((
+            (stage0_increment, previous, stage0_known, stage0_full),
+            (current, stage1_train, stage1_known, validation),
+        )):
+            records.append({"index": index, "files": dict(zip(
+                ("increment_train", "train", "known_val", "full_val"),
+                map(str, paths)))})
+        manifest.write_text(json.dumps({
+            "official_annotations": True, "stages": records,
+        }), encoding="utf-8")
 
         _manifest, _current, replay_pool, _validation = stage_paths(
             manifest, stage=1, coco_path=root)
