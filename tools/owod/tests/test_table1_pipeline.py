@@ -40,13 +40,16 @@ class Table1PipelineTests(unittest.TestCase):
             coco_path=Path("coco"), manifest=Path("manifest.json"), stage=1,
             output_dir=Path("out"), num_classes=91, epochs=20, batch_size=2,
             num_workers=4, seed=42, unknown_threshold=0.5, print_freq=100,
-            eval_print_freq=100, resume=None, pretrained=Path("base.pth"),
+            eval_print_freq=100, lr_drop=15, eval_interval=5,
+            resume=None, pretrained=Path("base.pth"),
             nproc_per_node=1, master_port=29521,
         )
         record = {"classes": [3, 4], "active_classes": [1, 2, 3, 4]}
         files = {"train": Path("train.json"), "full_val": Path("full.json")}
         joined = " ".join(build_command(args, record, files))
         self.assertIn("--owod-manifest manifest.json", joined)
+        self.assertIn("--lr_drop 15", joined)
+        self.assertIn("--eval_interval 5", joined)
         self.assertNotIn("--owod-baseline", joined)
 
 

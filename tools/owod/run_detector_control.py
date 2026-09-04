@@ -37,6 +37,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--nproc-per-node", default=2, type=int)
     parser.add_argument("--master-port", default=29521, type=int)
+    parser.add_argument("--lr-drop", default=15, type=int)
+    parser.add_argument("--eval-interval", default=5, type=int)
     parser.add_argument("--print-freq", default=100, type=int)
     parser.add_argument("--eval-print-freq", default=100, type=int)
     parser.add_argument("--unknown-threshold", default=0.5, type=float)
@@ -60,6 +62,8 @@ def build_command(args: argparse.Namespace, record: dict, files: dict[str, Path]
         "--owod-known-class-ids", *[str(value) for value in record["active_classes"]],
         "--owod-current-class-ids", *[str(value) for value in record["classes"]],
         "--unknown-threshold", str(args.unknown_threshold),
+        "--lr_drop", str(args.lr_drop),
+        "--eval_interval", str(args.eval_interval),
         "--print-freq", str(args.print_freq),
         "--eval-print-freq", str(args.eval_print_freq), "--no-file-log",
     ]

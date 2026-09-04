@@ -58,6 +58,40 @@ class OfficialProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reuse images"):
                 build_official_manifest(root, "m-owodb", "official-fixture-v1")
 
+    def test_rejects_placeholder_source_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_official_tree(root)
+            with self.assertRaisesRegex(ValueError, "still a placeholder"):
+                build_official_manifest(root, "m-owodb", "<replace with official source>")
+
+    def test_rejects_retired_locally_generated_split(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_official_tree(root)
+            (root / "split_manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "grouping_source": "ordered_20_per_stage",
+                "memory_fraction": 0.1,
+                "order": "random",
+                "seed": 42,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "retired local OWOD builder"):
+                build_official_manifest(root, "m-owodb", "official-fixture-v1")
+
+    def test_stage_loader_rejects_previously_written_placeholder_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = root / "split_manifest_deus.json"
+            manifest_path.write_text(json.dumps({
+                "official_annotations": True,
+                "source_reference": "<replace with official source>",
+                "annotation_root": str(root),
+                "stages": [],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "still a placeholder"):
+                stage_files(manifest_path, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
