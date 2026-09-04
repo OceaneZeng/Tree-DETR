@@ -45,17 +45,52 @@ manifest are supplied, the same log also includes `owod_u_recall`,
 
 ## Graph-local OWOD idea
 
-Run one increment from an earlier detector checkpoint with the graph-local
-replay controller. The first increment uses a deterministic positive-cosine
-similarity graph over the checkpoint classifier prototypes; selected old classes become a balanced
-replay set. Full-label validation keeps the normal COCO AP and OWOD metrics in
-the detector log. ``--graph-k`` is the total stage-level replay neighborhood:
-each old class receives its maximum risk score over all new classes, and the
-top-k old classes are selected. ``graph.json`` records the complete per-source
-and aggregated rankings for auditability.
+The main method is a trainable side-car GNN, not classifier-prototype cosine.
+It does not run in the detector inference path. First, a completed earlier
+detector is probed on that stage's training data. Decoder-FFN gradient sketches
+are the class-node features and the measured increase in target-class training
+loss after a short source-class LoRA update is the directed edge supervision.
+No validation annotations are used for either feature extraction or harm
+labels. Per-class sketches and per-source harm rows are cached, so an
+interrupted calibration can be resumed by running the same command.
+
+Before the full calibration, a pipeline-only smoke test can add
+`--source-limit 2 --sketch-max-images 2 --probe-max-images 2 --gnn-epochs 5`
+and use a separate output directory. Its checkpoint is marked
+`production_ready=false` and is intentionally rejected by the Stage 1 runner.
 
 ```bash
-OUT="$PWD/exps/owod/m-owodb/order0/graph_local/stage_1_cosine"
+CAL="$PWD/exps/owod/m-owodb/order0/graph_local/gnn_calibration_stage0"
+mkdir -p "$CAL"
+CUDA_VISIBLE_DEVICES=0 python tools/owod/calibrate_interference_gnn.py \
+  --coco_path "$PWD/data/coco" \
+  --manifest "$PWD/data/coco-owod/m-owodb/order0/split_manifest.json" \
+  --stage 0 \
+  --checkpoint "$PWD/exps/owod/m-owodb/order0/vanilla_d_detr/stage_0_50ep/checkpoint.pth" \
+  --output-dir "$CAL" \
+  --owod-baseline vanilla_d_detr --num_classes 91 \
+  --batch_size 1 --num_workers 4 --device cuda \
+  --sketch-max-images 12 --probe-max-images 12 --probe-steps 3 \
+  --gnn-epochs 400 \
+  2>&1 | tee "$CAL/launcher.log"
+```
+
+The calibration writes `empirical_stage0.pt`, `gnn_stage0.pt`,
+`calibration.log`, `calibration_summary.json`, and
+`calibration_complete.json`. The summary includes a held-out-source check;
+inspect it before treating the GNN as a useful estimator.
+
+For Stage 1, gradient sketches for old classes come from Stage 0 retained
+training data and sketches for current classes come from the Stage 1 increment
+training data. The GNN predicts all directed current-to-old edges. Each old
+class receives its maximum predicted risk over current classes and
+`--graph-k` selects the total stage-level Top-K replay neighborhood. At stage
+`t > 0`, replay exemplars are drawn from stage `t - 1`, never from the current
+increment annotation.
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1
+OUT="$PWD/exps/owod/m-owodb/order0/graph_local/stage_1_gnn_k5_v1"
 mkdir -p "$OUT"
 python tools/owod/run_graph_local_increment.py \
   --coco-path "$PWD/data/coco" \
@@ -63,23 +98,31 @@ python tools/owod/run_graph_local_increment.py \
   --stage 1 \
   --checkpoint "$PWD/exps/owod/m-owodb/order0/vanilla_d_detr/stage_0_50ep/checkpoint.pth" \
   --output-dir "$OUT" \
-  --owod-baseline vanilla_d_detr --epochs 20 --batch-size 2 \
+  --owod-baseline vanilla_d_detr \
+  --graph-estimator gnn \
+  --gnn-checkpoint "$CAL/gnn_stage0.pt" \
+  --graph-k 5 --replay-budget 256 \
+  --epochs 20 --batch-size 2 --num-workers 4 --eval-interval 5 \
   --gpus 0,1 --nproc-per-node 2 --master-port 29561 \
   2>&1 | tee "$OUT/launcher.log"
 ```
 
-Train the side-car GNN only from completed earlier graph artifacts:
+`graph.json` records feature provenance, GNN checkpoint metadata, all
+current-to-old scores, the aggregated ranking, and selected replay classes.
+`gnn_node_features.pt` stores the exact inference-stage node features. Detector
+logs are in `graph/train.log`, `graph/console.log`, and the outer
+`launcher.log`.
+
+Prototype cosine remains available only as an ablation with an explicit flag:
 
 ```bash
-python tools/graph_local/train_gnn.py \
-  --stages "$PWD/exps/owod/m-owodb/order0/graph_local/stage_1_cosine/gnn_stage.pt" \
-  --output "$PWD/exps/owod/m-owodb/order0/graph_local/gnn_stage_1.pt" \
-  --log-file "$PWD/exps/owod/m-owodb/order0/graph_local/gnn_train.log"
+python tools/owod/run_graph_local_increment.py ... \
+  --graph-estimator cosine --graph-k 5
 ```
 
-Pass `--graph-estimator gnn --gnn-checkpoint ...` to the stage 2 command and
-use the stage 1 detector checkpoint. The runner creates per-arm `train.log`
-and `console.log`; create the parent directory before an external `tee`.
-To continue an interrupted arm, keep the same output directory and add
-`--resume "$OUT/graph/checkpoint0004.pth"` (or the latest saved checkpoint),
-while leaving `--checkpoint` pointed at the previous completed stage.
+Do not use the legacy cosine-generated `gnn_stage.pt` files as GNN training
+labels. The runner rejects checkpoints without
+`supervision=empirical_train_loss_increase`. To continue an interrupted
+detector arm, keep the same output directory and add
+`--resume "$OUT/graph/checkpoint.pth"`, while leaving `--checkpoint` pointed at
+the previous completed stage detector.

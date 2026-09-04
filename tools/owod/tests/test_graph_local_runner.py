@@ -7,7 +7,9 @@ import numpy as np
 import torch
 
 from engine import _coco_ap50_for_categories
+from models.graph_local.gnn import ClassInterferenceGNN, save_gnn_checkpoint
 from models.graph_local.replay import build_increment_annotation
+from tools.owod.calibrate_interference_gnn import source_masks
 from tools.owod.run_graph_local_increment import (build_prototype_similarity_matrix,
                                                    random_neighbors,
                                                    get_parser,
@@ -79,6 +81,53 @@ def test_resume_defaults_to_none_instead_of_current_directory():
         "--output-dir", "output",
     ])
     assert args.resume is None
+    assert args.graph_estimator == "gnn"
+
+
+def test_gnn_checkpoint_must_have_empirical_harm_supervision():
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "legacy_gnn.pt"
+        save_gnn_checkpoint(ClassInterferenceGNN(input_dim=2), checkpoint,
+                            extra={"supervision": "cosine_proxy"})
+        args = SimpleNamespace(
+            control="graph", graph_estimator="gnn", graph_k=1,
+            gnn_checkpoint=checkpoint, gnn_min_score=0.0)
+        try:
+            select_neighbors(args, {
+                1: torch.tensor([1.0, 0.0]),
+                10: torch.tensor([0.0, 1.0]),
+            }, new_ids=[10], old_ids=[1])
+        except ValueError as error:
+            assert "not empirically supervised" in str(error)
+        else:
+            raise AssertionError("legacy proxy-supervised GNN checkpoint was accepted")
+
+
+def test_source_holdout_masks_entire_rows_without_label_leakage():
+    class_ids = [1, 2, 3, 4, 5]
+    valid = ~torch.eye(len(class_ids), dtype=torch.bool)
+    train, validation, held_out = source_masks(class_ids, valid, fraction=0.4, seed=42)
+
+    held_indices = [class_ids.index(class_id) for class_id in held_out]
+    assert len(held_out) == 2
+    assert not train[held_indices].any()
+    assert torch.equal(validation[held_indices], valid[held_indices])
+    assert not (train & validation).any()
+    assert torch.equal(train | validation, valid)
+
+
+def test_source_holdout_ignores_unprobed_rows():
+    class_ids = [1, 2, 3, 4]
+    valid = torch.zeros(4, 4, dtype=torch.bool)
+    valid[0, 1:] = True
+    valid[2, [0, 1, 3]] = True
+    train, validation, held_out = source_masks(class_ids, valid, fraction=0.5, seed=1)
+
+    assert len(held_out) == 1
+    assert held_out[0] in {1, 3}
+    assert not train[1].any() and not validation[1].any()
+    assert not train[3].any() and not validation[3].any()
+    assert torch.equal(train | validation, valid)
 
 
 def test_category_ap50_uses_requested_category_subset():

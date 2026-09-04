@@ -1,15 +1,13 @@
 #!/usr/bin/env python
 """Run graph-local replay for one M-OWODB/S-OWODB OWOD stage.
 
-The graph is a class-level controller around the detector.  It reads the
-previous checkpoint's classifier prototypes, scores directed new-to-old
-interference edges, and turns the selected old classes into a replay
-annotation.  The actual detector training/evaluation is delegated to
-``main.py`` so the standard OWOD objectness and full-label metrics are kept.
-
-Use ``--graph-estimator cosine`` for the first stage.  A later stage may use
-``--graph-estimator gnn`` with a GNN trained only from earlier ``gnn_stage.pt``
-artifacts via ``tools/graph_local/train_gnn.py``.
+The graph is a train-time class-level controller around the detector.  The
+main method extracts decoder gradient sketches for current and previous
+classes, predicts directed new-to-old interference with a GNN calibrated on
+an earlier stage, and turns the selected old classes into a replay annotation.
+The actual detector training/evaluation is delegated to ``main.py`` so the
+standard OWOD objectness and full-label metrics are kept.  Prototype cosine is
+retained only as an ablation.
 """
 
 from __future__ import annotations
@@ -31,8 +29,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.graph_local.gnn import compress_gradient_sketches, load_gnn_checkpoint
-from models.graph_local.interference import build_conflict_matrix
 from models.graph_local.replay import build_increment_annotation
+from tools.owod.gnn_calibration import (build_calibration_dataset,
+                                        compute_gradient_sketches,
+                                        load_detector)
 
 
 def read_json(path: Path) -> dict:
@@ -64,10 +64,16 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--nproc-per-node", default=2, type=int)
     parser.add_argument("--master-port", default=29561, type=int)
-    parser.add_argument("--graph-estimator", choices=("cosine", "gnn"), default="cosine")
+    parser.add_argument("--graph-estimator", choices=("cosine", "gnn"), default="gnn",
+                        help="GNN is the main method; cosine is a prototype ablation")
     parser.add_argument("--gnn-checkpoint", default="", type=Path)
     parser.add_argument("--graph-k", default=5, type=int)
     parser.add_argument("--gnn-min-score", default=0.0, type=float)
+    parser.add_argument("--graph-feature-device", default="cuda:0",
+                        help="device used to extract detector gradient sketches")
+    parser.add_argument("--sketch-max-images", default=12, type=int)
+    parser.add_argument("--sketch-batch-size", default=1, type=int)
+    parser.add_argument("--last-decoder-layers", default=2, type=int)
     parser.add_argument("--replay-budget", default=256, type=int)
     parser.add_argument("--control", choices=("graph", "random", "global"), default="graph")
     parser.add_argument("--eval-interval", default=5, type=int)
@@ -192,6 +198,16 @@ def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int]
     if not args.gnn_checkpoint:
         raise ValueError("--gnn-checkpoint is required for --graph-estimator gnn")
     gnn, metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
+    if metadata.get("supervision") != "empirical_train_loss_increase":
+        raise ValueError(
+            "The GNN checkpoint is not empirically supervised. Run "
+            "tools/owod/calibrate_interference_gnn.py on a completed earlier stage."
+        )
+    if not metadata.get("production_ready", False):
+        raise ValueError(
+            "The GNN checkpoint came from a partial smoke calibration. "
+            "Run calibration without --source-limit before the detector experiment."
+        )
     ordered, compressed = compress_gradient_sketches(features, output_dim=gnn.input_dim)
     with torch.no_grad():
         edge_prob = gnn(compressed)["edge_prob"]
@@ -199,7 +215,57 @@ def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int]
         ordered, edge_prob, new_ids, old_ids, args.graph_k, args.gnn_min_score)
     return selected, {"estimator": "trainable_class_interference_gnn",
                       "checkpoint": str(args.gnn_checkpoint.resolve()),
+                      "feature_source": "detector_decoder_ffn_gradient_sketch",
+                      "score_semantics": "predicted_directed_train_loss_increase",
                       "metadata": metadata, **details}
+
+
+def detector_gradient_features(args, current_ann: Path, replay_ann: Path,
+                               new_ids: list[int], old_ids: list[int]
+                               ) -> tuple[dict[int, torch.Tensor], dict]:
+    """Extract real detector gradients for the GNN nodes at the current stage."""
+    from main import get_args_parser
+
+    detector_args = get_args_parser().parse_args([])
+    detector_args.device = args.graph_feature_device
+    detector_args.num_classes = args.num_classes
+    detector_args.owod_baseline = args.owod_baseline
+    detector_args.coco_path = str(args.coco_path)
+    detector_args.dataset_file = "coco"
+    detector_args.masks = False
+    detector_args.cache_mode = False
+    detector_args.two_stage = False
+    detector_args.lightweight = args.lightweight
+    device = torch.device(args.graph_feature_device)
+    model, criterion = load_detector(detector_args, args.checkpoint, device)
+    old_dataset = build_calibration_dataset(args.coco_path, replay_ann, args.lightweight)
+    new_dataset = build_calibration_dataset(args.coco_path, current_ann, args.lightweight)
+    datasets = {class_id: old_dataset for class_id in old_ids}
+    datasets.update({class_id: new_dataset for class_id in new_ids})
+    class_ids = list(dict.fromkeys(old_ids + new_ids))
+    sketches, counts = compute_gradient_sketches(
+        model, criterion, datasets, class_ids, device,
+        cache_dir=args.output_dir / "node_sketches",
+        cache_identity={"checkpoint": str(args.checkpoint),
+                        "old_annotation": str(replay_ann),
+                        "new_annotation": str(current_ann)},
+        batch_size=args.sketch_batch_size,
+        num_workers=args.num_workers,
+        max_images=args.sketch_max_images,
+        last_decoder_layers=args.last_decoder_layers,
+    )
+    del model, criterion
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return sketches, {
+        "feature_source": "detector_decoder_ffn_gradient_sketch",
+        "old_annotation": str(replay_ann),
+        "new_annotation": str(current_ann),
+        "matched_annotations": counts,
+        "max_images_per_class": args.sketch_max_images,
+        "last_decoder_layers": args.last_decoder_layers,
+        "uses_validation_labels": False,
+    }
 
 
 def random_neighbors(old_ids: list[int], graph_k: int, seed: int) -> list[int]:
@@ -300,6 +366,8 @@ def main() -> int:
     args.coco_path = args.coco_path.resolve()
     args.manifest = args.manifest.resolve()
     args.checkpoint = args.checkpoint.resolve()
+    if args.gnn_checkpoint:
+        args.gnn_checkpoint = args.gnn_checkpoint.resolve()
     if args.resume:
         args.resume = args.resume.resolve()
     args.output_dir = args.output_dir.resolve()
@@ -332,12 +400,29 @@ def main() -> int:
         print(f"Resume fast path: reusing {graph_path}", flush=True)
         print(f"Resume fast path: reusing {train_ann}", flush=True)
     else:
-        all_ids = [int(value) for value in manifest["category_order_source_ids"]]
-        print(f"Loading graph features from {args.checkpoint}", flush=True)
-        features = classifier_features(args.checkpoint, all_ids)
-        selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
-        if args.control == "random":
-            selected = random_neighbors(old_ids, len(selected), args.seed)
+        feature_info = {}
+        features = None
+        if args.control == "global":
+            selected = list(old_ids)
+            graph_info = {"estimator": "none", "control": "global",
+                          "selected_k": len(selected)}
+        elif args.control == "random":
+            selected = random_neighbors(old_ids, args.graph_k, args.seed)
+            graph_info = {"estimator": "none", "control": "random",
+                          "requested_k": args.graph_k, "selected_k": len(selected),
+                          "seed": args.seed}
+        else:
+            print(f"Loading graph features from {args.checkpoint}", flush=True)
+            if args.graph_estimator == "gnn":
+                if not args.gnn_checkpoint or not args.gnn_checkpoint.is_file():
+                    raise SystemExit(f"missing GNN checkpoint: {args.gnn_checkpoint}")
+                features, feature_info = detector_gradient_features(
+                    args, current_ann, replay_ann, new_ids, old_ids)
+            else:
+                all_ids = [int(value) for value in manifest["category_order_source_ids"]]
+                features = classifier_features(args.checkpoint, all_ids)
+                feature_info = {"feature_source": "checkpoint_classifier_prototypes"}
+            selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
         if args.stage == 0 or not selected:
             train_ann = current_ann if args.stage > 0 else replay_ann
             replay_info = {"replay_classes": selected, "replay_images": 0,
@@ -347,23 +432,22 @@ def main() -> int:
             replay_info = build_increment_annotation(
                 current_ann, replay_ann, selected, args.replay_budget, train_ann, args.seed)
 
-        graph_class_ids, graph_features = compress_gradient_sketches(features, output_dim=128)
-        _, conflict = build_conflict_matrix(features)
-        harm = torch.zeros_like(conflict)
-        valid = torch.zeros_like(conflict, dtype=torch.bool)
-        index = {class_id: i for i, class_id in enumerate(graph_class_ids)}
-        for source in new_ids:
-            for target in old_ids:
-                harm[index[source], index[target]] = conflict[index[source], index[target]]
-                valid[index[source], index[target]] = True
-        torch.save({"schema_version": 2, "class_ids": graph_class_ids,
-                    "features": graph_features, "harm": harm, "valid_mask": valid,
-                    "source_classes": new_ids, "target_classes": old_ids},
-                   args.output_dir / "gnn_stage.pt")
+        if args.graph_estimator == "gnn" and features is not None:
+            gnn, _metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
+            graph_class_ids, graph_features = compress_gradient_sketches(
+                features, output_dim=gnn.input_dim)
+            torch.save({
+                "schema_version": 1,
+                "class_ids": graph_class_ids,
+                "features": graph_features,
+                "source_classes": new_ids,
+                "target_classes": old_ids,
+                "metadata": feature_info,
+            }, args.output_dir / "gnn_node_features.pt")
         write_json(graph_path, {
             "stage": args.stage, "new_classes": new_ids, "old_classes": old_ids,
             "selected_replay_classes": selected, "graph": graph_info,
-            "replay": replay_info, "feature_source": "checkpoint classifier prototypes",
+            "replay": replay_info, **feature_info,
         })
 
     arm_dir = args.output_dir / args.control

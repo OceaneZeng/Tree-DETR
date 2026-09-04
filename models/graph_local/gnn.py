@@ -286,7 +286,9 @@ def save_gnn_checkpoint(model: ClassInterferenceGNN, path: str | Path,
         payload["extra"] = dict(extra)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, destination)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(destination)
 
 
 def load_gnn_checkpoint(path: str | Path, device: torch.device | str = "cpu"
