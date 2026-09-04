@@ -218,7 +218,11 @@ def stage_paths(manifest_path: Path, stage: int, coco_path: Path) -> tuple[dict,
     current = stage_dir / "instances_increment_train2017.json"
     if not current.is_file():
         current = stage_dir / "instances_increment_only_train2017.json"
-    seen = stage_dir / "instances_train2017.json"
+    # Replay must come from data retained before the current increment. Using
+    # the current stage's seen annotation would select many current images and
+    # can duplicate their annotations when the increment is assembled.
+    replay_stage_dir = root / f"stage_{max(0, stage - 1)}"
+    replay_pool = replay_stage_dir / "instances_train2017.json"
     val = stage_dir / "instances_val2017_full.json"
     if not val.is_file():
         val = stage_dir / "instances_val2017.json"
@@ -226,10 +230,10 @@ def stage_paths(manifest_path: Path, stage: int, coco_path: Path) -> tuple[dict,
         # IOD-style manifests may not materialize a full-label file.  The
         # source COCO validation annotation is the correct OWOD fallback.
         val = coco_path / "annotations" / "instances_val2017.json"
-    for path in (current, seen, val):
+    for path in (current, replay_pool, val):
         if not path.is_file():
             raise FileNotFoundError(f"manifest stage file is missing: {path}")
-    return manifest, current, seen, val
+    return manifest, current, replay_pool, val
 
 
 def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
@@ -299,8 +303,8 @@ def main() -> int:
     if args.resume:
         args.resume = args.resume.resolve()
     args.output_dir = args.output_dir.resolve()
-    manifest, current_ann, seen_ann, full_val = stage_paths(args.manifest, args.stage,
-                                                            args.coco_path)
+    manifest, current_ann, replay_ann, full_val = stage_paths(args.manifest, args.stage,
+                                                              args.coco_path)
     record = manifest["stages"][args.stage]
     new_ids = [int(value) for value in record["classes"]]
     active_ids = [int(value) for value in record["active_classes"]]
@@ -316,7 +320,7 @@ def main() -> int:
     if args.resume:
         train_ann = annotation_dir / f"train_{args.control}.json"
         if args.stage == 0:
-            train_ann = seen_ann
+            train_ann = replay_ann
         if not graph_path.is_file() or not train_ann.is_file():
             raise SystemExit(
                 "resume requires the original graph.json and training annotation; "
@@ -335,13 +339,13 @@ def main() -> int:
         if args.control == "random":
             selected = random_neighbors(old_ids, len(selected), args.seed)
         if args.stage == 0 or not selected:
-            train_ann = current_ann if args.stage > 0 else seen_ann
+            train_ann = current_ann if args.stage > 0 else replay_ann
             replay_info = {"replay_classes": selected, "replay_images": 0,
                            "total_images": len(read_json(train_ann).get("images", []))}
         else:
             train_ann = annotation_dir / f"train_{args.control}.json"
             replay_info = build_increment_annotation(
-                current_ann, seen_ann, selected, args.replay_budget, train_ann, args.seed)
+                current_ann, replay_ann, selected, args.replay_budget, train_ann, args.seed)
 
         graph_class_ids, graph_features = compress_gradient_sketches(features, output_dim=128)
         _, conflict = build_conflict_matrix(features)

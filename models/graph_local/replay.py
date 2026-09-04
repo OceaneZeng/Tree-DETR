@@ -88,15 +88,30 @@ def build_increment_annotation(new_annotations, base_annotations,
             used_image_ids[new_id] = copied.get("file_name")
 
     annotations = []
+    # Both files may originate from the same COCO source. Preserve the source
+    # annotation identity while merging so an overlapping image cannot acquire
+    # duplicate boxes merely because output IDs are regenerated.
+    annotation_keys = set()
     for annotation in new_coco.get("annotations", []):
         copied = dict(annotation)
+        source_key = (int(copied["image_id"]), int(copied.get("id", -1)))
+        annotation_keys.add(source_key)
         copied["id"] = len(annotations) + 1
         annotations.append(copied)
     for annotation in replay_annotations:
         copied = dict(annotation)
-        copied["id"] = len(annotations) + 1
         copied["image_id"] = replay_id_map[int(annotation["image_id"])]
+        source_key = (int(copied["image_id"]), int(annotation.get("id", -1)))
+        if source_key in annotation_keys:
+            continue
+        annotation_keys.add(source_key)
+        copied["id"] = len(annotations) + 1
         annotations.append(copied)
+
+    categories_by_id = {
+        int(category["id"]): dict(category)
+        for category in [*base_coco.get("categories", []), *new_coco.get("categories", [])]
+    }
 
     combined = {
         "info": {
@@ -109,7 +124,7 @@ def build_increment_annotation(new_annotations, base_annotations,
         "licenses": new_coco.get("licenses", base_coco.get("licenses", [])),
         "images": images,
         "annotations": annotations,
-        "categories": new_coco.get("categories", base_coco.get("categories", [])),
+        "categories": [categories_by_id[class_id] for class_id in sorted(categories_by_id)],
     }
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -121,4 +136,6 @@ def build_increment_annotation(new_annotations, base_annotations,
         "replay_images": len(replay_images),
         "total_images": len(images),
         "replay_classes": [int(class_id) for class_id in replay_classes],
+        "replay_source": (str(base_annotations)
+                          if not isinstance(base_annotations, Mapping) else "<in-memory>"),
     }
