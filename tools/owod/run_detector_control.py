@@ -43,6 +43,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-print-freq", default=100, type=int)
     parser.add_argument("--unknown-threshold", default=0.5, type=float)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--allow-unverified-protocol", action="store_true",
+                        help="internal pilot only; marks the run as not paper-comparable")
     return parser
 
 
@@ -90,7 +92,8 @@ def main() -> int:
     args.output_dir = args.output_dir.resolve()
     if not args.coco_path.is_dir():
         raise SystemExit(f"missing COCO path: {args.coco_path}")
-    manifest, files = stage_files(args.manifest, args.stage)
+    manifest, files = stage_files(
+        args.manifest, args.stage, allow_unverified=args.allow_unverified_protocol)
     record = manifest["stages"][args.stage]
     if args.resume and not args.resume.is_file():
         raise SystemExit(f"missing resume checkpoint: {args.resume}")
@@ -102,6 +105,7 @@ def main() -> int:
         "runner": "tools/owod/run_detector_control.py",
         "detector_profile": detector_profile_dict(),
         "protocol": manifest["protocol"], "paper_comparable": manifest["paper_comparable"],
+        "protocol_validation": manifest.get("validation_mode", "official"),
         "stage": args.stage, "command": command,
     }
     (args.output_dir / "run_config.json").write_text(

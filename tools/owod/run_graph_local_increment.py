@@ -86,6 +86,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-random-crop", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--allow-unverified-protocol", action="store_true",
+                        help="internal pilot only; marks the run as not paper-comparable")
     return parser
 
 
@@ -217,11 +219,14 @@ def random_neighbors(old_ids: list[int], graph_k: int, seed: int) -> list[int]:
     return sorted(rng.sample(old_ids, min(len(old_ids), max(0, graph_k))))
 
 
-def stage_paths(manifest_path: Path, stage: int, coco_path: Path
+def stage_paths(manifest_path: Path, stage: int, coco_path: Path,
+                allow_unverified: bool = False
                 ) -> tuple[dict, Path, Path, Path]:
     del coco_path  # image root is unrelated to annotation provenance
-    manifest, current_files = stage_files(manifest_path, stage)
-    _prior_manifest, replay_files = stage_files(manifest_path, max(0, stage - 1))
+    manifest, current_files = stage_files(
+        manifest_path, stage, allow_unverified=allow_unverified)
+    _prior_manifest, replay_files = stage_files(
+        manifest_path, max(0, stage - 1), allow_unverified=allow_unverified)
     return (manifest, current_files["increment_train"], replay_files["train"],
             current_files["full_val"])
 
@@ -301,8 +306,9 @@ def main() -> int:
     if args.resume:
         args.resume = args.resume.resolve()
     args.output_dir = args.output_dir.resolve()
-    manifest, current_ann, replay_ann, full_val = stage_paths(args.manifest, args.stage,
-                                                              args.coco_path)
+    manifest, current_ann, replay_ann, full_val = stage_paths(
+        args.manifest, args.stage, args.coco_path,
+        allow_unverified=args.allow_unverified_protocol)
     record = manifest["stages"][args.stage]
     new_ids = [int(value) for value in record["classes"]]
     active_ids = [int(value) for value in record["active_classes"]]
@@ -388,6 +394,8 @@ def main() -> int:
                 "active_classes": active_ids, "selected_replay_classes": selected,
                 "graph_estimator": "gnn" if args.control == "graph" else "none",
                 "exemplars_per_class": args.exemplars_per_class,
+                "protocol_validation": manifest.get("validation_mode", "official"),
+                "paper_comparable": bool(manifest.get("paper_comparable", False)),
                 "checkpoint": str(args.checkpoint),
                 "resume": str(args.resume) if args.resume else "",
                 "command": command}

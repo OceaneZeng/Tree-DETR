@@ -76,6 +76,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-k", default=5, type=int)
     parser.add_argument("--force", action="store_true",
                         help="discard reusable per-class sketch/probe caches")
+    parser.add_argument("--allow-unverified-protocol", action="store_true",
+                        help="internal pilot only; marks the run as not paper-comparable")
     parser.set_defaults(dataset_file="coco", masks=False, cache_mode=False,
                         two_stage=False, num_classes=91)
     return parser
@@ -195,7 +197,8 @@ def run(args: argparse.Namespace) -> int:
     probe_sources = class_ids[:args.source_limit] if args.source_limit else class_ids
     if len(probe_sources) < 2:
         raise ValueError("Calibration requires at least two source classes")
-    _manifest, files = stage_files(args.manifest, args.stage)
+    checked_manifest, files = stage_files(
+        args.manifest, args.stage, allow_unverified=args.allow_unverified_protocol)
     annotation = files["train"]
     if args.force:
         print("--force ignores existing sketch and harm-row cache files")
@@ -212,6 +215,8 @@ def run(args: argparse.Namespace) -> int:
         "deterministic_calibration_transforms": True,
         "uses_validation_labels": False,
         "gnn_ablation": ablation,
+        "protocol_validation": checked_manifest.get("validation_mode", "official"),
+        "paper_comparable": bool(checked_manifest.get("paper_comparable", False)),
     }, indent=2))
     dataset = build_calibration_dataset(Path(args.coco_path).resolve(), annotation,
                                         lightweight=args.lightweight)
@@ -342,6 +347,8 @@ def run(args: argparse.Namespace) -> int:
             "probed_source_classes": probe_sources,
             "production_ready": len(probe_sources) == len(class_ids),
             "gnn_ablation": ablation,
+            "protocol_validation": checked_manifest.get("validation_mode", "official"),
+            "paper_comparable": bool(checked_manifest.get("paper_comparable", False)),
         },
     }
     artifact_path = args.output_dir / f"empirical_stage{args.stage}.pt"
@@ -389,6 +396,8 @@ def run(args: argparse.Namespace) -> int:
         "epochs": args.gnn_epochs,
         "final_training_loss": final_history[-1],
         "gnn_ablation": ablation,
+        "protocol_validation": checked_manifest.get("validation_mode", "official"),
+        "paper_comparable": bool(checked_manifest.get("paper_comparable", False)),
     }
     save_gnn_checkpoint(final_model, checkpoint_path, extra=metadata)
     summary = {
@@ -411,7 +420,9 @@ def run(args: argparse.Namespace) -> int:
         "stage": args.stage, "class_count": size,
         "gnn_checkpoint": str(checkpoint_path),
         "production_ready": len(probe_sources) == len(class_ids),
-        "gnn_ablation": ablation})
+        "gnn_ablation": ablation,
+        "protocol_validation": checked_manifest.get("validation_mode", "official"),
+        "paper_comparable": bool(checked_manifest.get("paper_comparable", False))})
     print(json.dumps(summary, indent=2))
     return 0
 

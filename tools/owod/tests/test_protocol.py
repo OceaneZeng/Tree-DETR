@@ -92,6 +92,21 @@ class OfficialProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "still a placeholder"):
                 stage_files(manifest_path, 0)
 
+    def test_explicit_unverified_mode_is_labeled_not_paper_comparable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_official_tree(root)
+            manifest = build_official_manifest(root, "m-owodb", "official-fixture-v1")
+            manifest["source_reference"] = "<unverified pilot>"
+            manifest_path = root / "pilot_manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            loaded, files = stage_files(manifest_path, 0, allow_unverified=True)
+
+            self.assertFalse(loaded["paper_comparable"])
+            self.assertEqual(loaded["validation_mode"], "unverified_pilot")
+            self.assertTrue(files["train"].is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

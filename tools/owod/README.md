@@ -36,6 +36,11 @@ The importer requires four disjoint increments, cumulative known classes, all
 It records SHA-256 hashes and the supplied official source reference. The last check
 guards against the M-OWODB annotation duplication bug noted in DEUS Table 1.
 
+For an internal engineering pilot on an unverified manifest, the calibration,
+GNN runner, and detector control accept `--allow-unverified-protocol`. This
+explicitly records `paper_comparable=false`; results from that mode must not be
+compared with published OWOD tables.
+
 ## 2. External Table 1 baselines
 
 ORE, OW-DETR, CAT, PROB, OrthogonalDet, O1O, OWOBJ, and DEUS are external

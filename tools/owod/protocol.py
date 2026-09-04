@@ -71,15 +71,24 @@ def reject_retired_local_split(annotation_root: Path) -> None:
             "separate clean directory before registration")
 
 
-def stage_files(manifest_path: Path, stage: int) -> tuple[dict, dict[str, Path]]:
+def stage_files(manifest_path: Path, stage: int,
+                allow_unverified: bool = False) -> tuple[dict, dict[str, Path]]:
     manifest = read_json(manifest_path)
-    if not manifest.get("official_annotations"):
-        raise ValueError(
-            "Manifest was not produced from externally supplied official OWOD annotations")
-    validate_source_reference(manifest.get("source_reference", ""))
     annotation_root = resolve_manifest_path(
         manifest_path, manifest.get("annotation_root", str(manifest_path.parent)))
-    reject_retired_local_split(annotation_root)
+    if allow_unverified:
+        manifest = dict(manifest)
+        manifest["paper_comparable"] = False
+        manifest["validation_mode"] = "unverified_pilot"
+        manifest["validation_warning"] = (
+            "Explicitly allowed unverified annotations; do not compare this run "
+            "with published OWOD tables")
+    else:
+        if not manifest.get("official_annotations"):
+            raise ValueError(
+                "Manifest was not produced from externally supplied official OWOD annotations")
+        validate_source_reference(manifest.get("source_reference", ""))
+        reject_retired_local_split(annotation_root)
     stages = manifest.get("stages", [])
     if stage < 0 or stage >= len(stages):
         raise ValueError(f"stage {stage} is outside manifest [0, {len(stages)})")

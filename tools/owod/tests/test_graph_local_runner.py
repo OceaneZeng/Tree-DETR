@@ -161,7 +161,9 @@ def test_stage_one_replay_pool_comes_from_previous_stage():
                 ("increment_train", "train", "known_val", "full_val"),
                 map(str, paths)))})
         manifest.write_text(json.dumps({
-            "official_annotations": True, "stages": records,
+            "official_annotations": True,
+            "source_reference": "official-fixture-v1",
+            "stages": records,
         }), encoding="utf-8")
 
         _manifest, _current, replay_pool, _validation = stage_paths(
