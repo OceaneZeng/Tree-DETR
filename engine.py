@@ -22,6 +22,9 @@ from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
 from models.graph_local.distillation import old_class_distillation_losses
+from models.graph_local.losses import local_margin_loss, projection_loss
+from models.graph_local.lora import lora_delta_vector
+from models.graph_local.pseudo_labels import select_teacher_pseudo_labels
 from models.owod_metrics import compute_owod_metrics, harmonic_score, table1_summary
 
 
@@ -33,14 +36,26 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     distill_class_coef: float = 2.0,
                     distill_bbox_coef: float = 5.0,
                     distill_score_threshold: float = 0.3,
-                    distill_max_queries: int = 20):
+                    distill_max_queries: int = 20,
+                    teacher_completion: bool = False,
+                    teacher_old_class_ids: Iterable[int] | None = None,
+                    teacher_score_threshold: float = 0.5,
+                    teacher_duplicate_iou: float = 0.7,
+                    teacher_ground_truth_iou: float = 0.5,
+                    teacher_max_per_image: int = 20,
+                    graph_local_class_ids: Iterable[int] | None = None,
+                    local_margin_coef: float = 0.0,
+                    local_margin: float = 1.0,
+                    off_neighborhood_basis: torch.Tensor | None = None,
+                    off_projection_coef: float = 0.0):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(
         delimiter="  ",
         visible_meters={"lr", "class_error", "grad_norm", "loss", "loss_ce",
                         "loss_bbox", "loss_giou", "loss_distill_cls",
-                        "loss_distill_bbox", "distill_queries"})
+                        "loss_distill_bbox", "distill_queries", "pseudo_labels",
+                        "loss_local_margin", "loss_off_projection"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -53,11 +68,33 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if teacher is not None:
             with torch.no_grad():
                 teacher_outputs = teacher(samples)
+        completed_targets = targets
+        pseudo_label_counts = [0] * len(targets)
+        if teacher_completion:
+            if teacher_outputs is None:
+                raise RuntimeError("teacher completion requires a frozen teacher")
+            completed_targets, pseudo_label_counts = select_teacher_pseudo_labels(
+                teacher_outputs, targets, teacher_old_class_ids or [],
+                score_threshold=teacher_score_threshold,
+                duplicate_iou=teacher_duplicate_iou,
+                ground_truth_iou=teacher_ground_truth_iou,
+                max_per_image=teacher_max_per_image)
         outputs = model(samples)
-        loss_dict = criterion(outputs, targets)
+        loss_dict = criterion(outputs, completed_targets)
         weight_dict = dict(criterion.weight_dict)
+        if local_margin_coef > 0:
+            loss_dict['loss_local_margin'] = local_margin_loss(
+                outputs, completed_targets, criterion.matcher,
+                graph_local_class_ids or [], margin=local_margin)
+            weight_dict['loss_local_margin'] = float(local_margin_coef)
+        if off_projection_coef > 0:
+            if off_neighborhood_basis is None:
+                raise RuntimeError("off-neighborhood projection requires a basis")
+            loss_dict['loss_off_projection'] = projection_loss(
+                lora_delta_vector(model), off_neighborhood_basis)
+            weight_dict['loss_off_projection'] = float(off_projection_coef)
         distill_query_count = 0
-        if teacher is not None:
+        if teacher_outputs is not None and distill_old_class_ids:
             distill_losses, distill_query_count = old_class_distillation_losses(
                 outputs, teacher_outputs, distill_old_class_ids or [],
                 score_threshold=distill_score_threshold,
@@ -96,8 +133,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
-        if teacher is not None:
+        if teacher_outputs is not None and distill_old_class_ids:
             metric_logger.update(distill_queries=float(distill_query_count))
+        if teacher_completion:
+            metric_logger.update(pseudo_labels=float(sum(pseudo_label_counts)))
         samples, targets = prefetcher.next()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

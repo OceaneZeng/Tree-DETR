@@ -25,10 +25,14 @@ from typing import Mapping
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
+OPS = ROOT / "models" / "ops"
+if str(OPS) not in sys.path:
+    sys.path.insert(0, str(OPS))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.graph_local.gnn import compress_gradient_sketches, load_gnn_checkpoint
+from models.graph_local.protection import build_off_neighborhood_basis
 from models.graph_local.replay import build_increment_annotation
 from tools.owod.gnn_calibration import (build_calibration_dataset,
                                         compute_gradient_sketches,
@@ -99,6 +103,27 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distill-bbox-coef", default=5.0, type=float)
     parser.add_argument("--distill-score-threshold", default=0.3, type=float)
     parser.add_argument("--distill-max-queries", default=20, type=int)
+    lora_group = parser.add_mutually_exclusive_group()
+    lora_group.add_argument("--neighbor-scoped-lora", dest="neighbor_scoped_lora",
+                            action="store_true")
+    lora_group.add_argument("--no-neighbor-scoped-lora", dest="neighbor_scoped_lora",
+                            action="store_false")
+    parser.set_defaults(neighbor_scoped_lora=True)
+    parser.add_argument("--lora-rank", default=8, type=int)
+    parser.add_argument("--local-margin-coef", default=0.5, type=float)
+    parser.add_argument("--local-margin", default=1.0, type=float)
+    parser.add_argument("--off-projection-coef", default=0.1, type=float)
+    parser.add_argument("--off-basis-rank", default=8, type=int)
+    completion_group = parser.add_mutually_exclusive_group()
+    completion_group.add_argument("--teacher-completion", dest="teacher_completion",
+                                  action="store_true")
+    completion_group.add_argument("--no-teacher-completion", dest="teacher_completion",
+                                  action="store_false")
+    parser.set_defaults(teacher_completion=True)
+    parser.add_argument("--teacher-score-threshold", default=0.5, type=float)
+    parser.add_argument("--teacher-duplicate-iou", default=0.7, type=float)
+    parser.add_argument("--teacher-ground-truth-iou", default=0.5, type=float)
+    parser.add_argument("--teacher-max-per-image", default=20, type=int)
     parser.add_argument("--unknown-threshold", default=0.5, type=float)
     parser.add_argument("--lightweight", action="store_true")
     parser.add_argument("--no-random-crop", action="store_true")
@@ -265,7 +290,9 @@ def stage_paths(manifest_path: Path, stage: int, coco_path: Path,
 
 
 def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
-                       active_ids: list[int], old_ids: list[int], reset_classifier: bool) -> list[str]:
+                       active_ids: list[int], old_ids: list[int], reset_classifier: bool,
+                       selected_ids: list[int] | None = None,
+                       off_basis_path: Path | None = None) -> list[str]:
     main = [str(ROOT / "main.py"), "--coco_path", str(args.coco_path),
             "--train-ann", str(train_ann), "--val-ann", str(val_ann),
             "--output_dir", str(arm_dir), "--num_classes", str(args.num_classes),
@@ -296,6 +323,37 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--distill-bbox-coef", str(args.distill_bbox_coef),
             "--distill-score-threshold", str(args.distill_score_threshold),
             "--distill-max-queries", str(args.distill_max_queries),
+        ]
+    current_ids = [value for value in active_ids if value not in set(old_ids)]
+    local_ids = list(dict.fromkeys(current_ids + list(selected_ids or [])))
+    if args.neighbor_scoped_lora:
+        if not current_ids:
+            raise ValueError("neighbor-scoped LoRA requires current-stage classes")
+        main += [
+            "--neighbor-scoped-lora",
+            "--lora-rank", str(args.lora_rank),
+            "--lora-last-decoder-layers", str(args.last_decoder_layers),
+            "--trainable-class-ids", *[str(value) for value in current_ids],
+        ]
+        if args.off_projection_coef > 0:
+            if off_basis_path is None:
+                raise ValueError("off-neighborhood projection requires a basis path")
+            main += ["--off-projection-coef", str(args.off_projection_coef),
+                     "--off-neighborhood-basis", str(off_basis_path)]
+    if args.local_margin_coef > 0:
+        main += [
+            "--graph-local-class-ids", *[str(value) for value in local_ids],
+            "--local-margin-coef", str(args.local_margin_coef),
+            "--local-margin", str(args.local_margin),
+        ]
+    if args.teacher_completion and old_ids:
+        main += [
+            "--teacher-completion",
+            "--teacher-old-class-ids", *[str(value) for value in old_ids],
+            "--teacher-score-threshold", str(args.teacher_score_threshold),
+            "--teacher-duplicate-iou", str(args.teacher_duplicate_iou),
+            "--teacher-ground-truth-iou", str(args.teacher_ground_truth_iou),
+            "--teacher-max-per-image", str(args.teacher_max_per_image),
         ]
     if old_ids:
         main += ["--owod-previous-class-ids", *[str(value) for value in old_ids]]
@@ -355,6 +413,10 @@ def main() -> int:
     if adaptive_quota and args.exemplars_per_class is not None:
         raise SystemExit(
             "use either --exemplars-per-class or the base/risk adaptive quotas, not both")
+    if args.off_projection_coef > 0 and not args.neighbor_scoped_lora:
+        raise SystemExit(
+            "--off-projection-coef requires --neighbor-scoped-lora; set it to 0 "
+            "for the without-LoRA ablation")
     args.coco_path = args.coco_path.resolve()
     args.manifest = args.manifest.resolve()
     args.checkpoint = args.checkpoint.resolve()
@@ -378,6 +440,7 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     annotation_dir = args.output_dir / "annotations"
     graph_path = args.output_dir / "graph.json"
+    off_basis_path = args.output_dir / "off_neighborhood_basis.pt"
     if args.resume:
         train_ann = annotation_dir / f"train_{args.control}.json"
         if args.stage == 0:
@@ -390,11 +453,23 @@ def main() -> int:
         selected = [int(value) for value in saved_graph.get("selected_replay_classes", [])]
         graph_info = saved_graph.get("graph", {})
         replay_info = saved_graph.get("replay", {})
+        if (args.neighbor_scoped_lora and args.off_projection_coef > 0 and
+                not off_basis_path.is_file()):
+            raise SystemExit(
+                "resume requires the original off-neighborhood basis: "
+                f"{off_basis_path}")
         print(f"Resume fast path: reusing {graph_path}", flush=True)
         print(f"Resume fast path: reusing {train_ann}", flush=True)
     else:
         feature_info = {}
         features = None
+        needs_features = (args.control == "graph" or
+                          (args.neighbor_scoped_lora and
+                           args.off_projection_coef > 0 and bool(old_ids)))
+        if needs_features:
+            print(f"Loading graph/protection features from {args.checkpoint}", flush=True)
+            features, feature_info = detector_gradient_features(
+                args, current_ann, replay_ann, new_ids, old_ids)
         if args.control == "global":
             selected = list(old_ids)
             graph_info = {"estimator": "none", "control": "global",
@@ -405,11 +480,9 @@ def main() -> int:
                           "requested_k": args.graph_k, "selected_k": len(selected),
                           "seed": args.seed}
         else:
-            print(f"Loading graph features from {args.checkpoint}", flush=True)
             if args.gnn_checkpoint is None or not args.gnn_checkpoint.is_file():
                 raise SystemExit(f"missing GNN checkpoint: {args.gnn_checkpoint}")
-            features, feature_info = detector_gradient_features(
-                args, current_ann, replay_ann, new_ids, old_ids)
+            assert features is not None
             selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
         if args.stage == 0 or (not selected and args.base_exemplars_per_class <= 0):
             train_ann = current_ann if args.stage > 0 else replay_ann
@@ -442,7 +515,7 @@ def main() -> int:
                 current_ann, replay_ann, replay_classes, uniform_quota,
                 train_ann, args.seed, class_quotas=class_quotas)
 
-        if features is not None:
+        if features is not None and args.control == "graph":
             gnn, _metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
             graph_class_ids, graph_features = compress_gradient_sketches(
                 features, output_dim=gnn.input_dim)
@@ -454,15 +527,38 @@ def main() -> int:
                 "target_classes": old_ids,
                 "metadata": feature_info,
             }, args.output_dir / "gnn_node_features.pt")
+        protection_info = {
+            "enabled": bool(args.neighbor_scoped_lora and args.off_projection_coef > 0),
+            "off_classes": sorted(set(old_ids) - set(selected)),
+            "excluded_classes": sorted(set(new_ids) | set(selected)),
+            "basis_rank": 0,
+            "basis_path": "",
+        }
+        if protection_info["enabled"]:
+            if features is None:
+                raise SystemExit("off-neighborhood projection requires detector gradient sketches")
+            basis = build_off_neighborhood_basis(
+                features, excluded_classes=protection_info["excluded_classes"],
+                max_rank=args.off_basis_rank)
+            torch.save({
+                "basis": basis,
+                "off_classes": protection_info["off_classes"],
+                "excluded_classes": protection_info["excluded_classes"],
+                "last_decoder_layers": args.last_decoder_layers,
+            }, off_basis_path)
+            protection_info["basis_rank"] = int(basis.shape[1])
+            protection_info["basis_path"] = str(off_basis_path)
         write_json(graph_path, {
             "stage": args.stage, "new_classes": new_ids, "old_classes": old_ids,
             "selected_replay_classes": selected, "graph": graph_info,
-            "replay": replay_info, **feature_info,
+            "replay": replay_info, "protection": protection_info, **feature_info,
         })
 
     arm_dir = args.output_dir / args.control
     command = build_main_command(args, train_ann, full_val, arm_dir, active_ids, old_ids,
-                                 args.stage == 0)
+                                 args.stage == 0, selected_ids=selected,
+                                 off_basis_path=(off_basis_path if args.off_projection_coef > 0
+                                                 else None))
     metadata = {"runner": "tools/owod/run_graph_local_increment.py", "stage": args.stage,
                 "new_classes": new_ids, "old_classes": old_ids,
                 "active_classes": active_ids, "selected_replay_classes": selected,
@@ -478,6 +574,28 @@ def main() -> int:
                 "distill_max_queries": args.distill_max_queries,
                 "graph_aggregation": args.graph_aggregation,
                 "graph_aggregation_top_n": args.graph_aggregation_top_n,
+                "neighbor_scoped_lora": args.neighbor_scoped_lora,
+                "lora_rank": args.lora_rank,
+                "lora_last_decoder_layers": args.last_decoder_layers,
+                "teacher_completion": args.teacher_completion,
+                "teacher_score_threshold": args.teacher_score_threshold,
+                "local_margin_coef": args.local_margin_coef,
+                "local_margin": args.local_margin,
+                "off_projection_coef": args.off_projection_coef,
+                "off_basis_rank": args.off_basis_rank,
+                "off_neighborhood_basis": (str(off_basis_path)
+                                           if off_basis_path.is_file() else ""),
+                "method_modules": {
+                    "class_interference_gnn": args.control == "graph",
+                    "neighbor_scoped_lora": args.neighbor_scoped_lora,
+                    "graph_conditioned_objective": {
+                        "teacher_completion": bool(args.teacher_completion and old_ids),
+                        "graph_replay": bool(replay_info.get("replay_images", 0)),
+                        "local_margin": args.local_margin_coef > 0,
+                        "off_neighborhood_projection": (
+                            args.neighbor_scoped_lora and args.off_projection_coef > 0),
+                    },
+                },
                 "lr": args.lr,
                 "lr_backbone": args.lr_backbone,
                 "protocol_validation": manifest.get("validation_mode", "official"),
@@ -493,8 +611,11 @@ def main() -> int:
         env["CUDA_VISIBLE_DEVICES"] = args.gpus
     code = stream_process(command, arm_dir, env, args.dry_run, append=bool(args.resume))
     write_json(args.output_dir / "summary.json", {**metadata, "return_code": code,
+                "training_complete": (arm_dir / "training_complete.json").is_file(),
                 "train_log": str((arm_dir / "train.log").resolve()),
-                "metrics_log": str((arm_dir / "metrics.jsonl").resolve())})
+                "metrics_log": str((arm_dir / "metrics.jsonl").resolve()),
+                "resume_checkpoint": str((arm_dir / "checkpoint.pth").resolve()),
+                "merged_checkpoint": str((arm_dir / "checkpoint_merged.pth").resolve())})
     return code
 
 

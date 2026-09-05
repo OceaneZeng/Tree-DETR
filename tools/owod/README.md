@@ -1,4 +1,4 @@
-# Deformable DETR + GNN on the DEUS OWOD protocol
+# Graph-local continual adapters on Deformable DETR
 
 This project keeps Deformable DETR as its detector. It adopts the experimental
 shape of DEUS (CVPR 2026): four sequential tasks on M-OWODB and S-OWODB,
@@ -7,8 +7,12 @@ Previous/Current/Known mAP, U-Rec, and H-Score.
 
 The local method is not a reimplementation of DEUS. DEUS uses OrthogonalDet,
 ETF-Subspace Unknown Separation (EUS), and Energy-based Known Distinction
-(EKD). Here a trainable GNN estimates directed class interference and selects
-old-class exemplars for Deformable DETR. The detector backbone is unchanged.
+(EKD). Here the local method has three modules around an unchanged Deformable
+DETR: a Class-Interference GNN selects old classes needing extra protection, a
+temporary Neighbor-Scoped LoRA updates the final two decoder FFNs, and a
+Graph-Conditioned Continual Objective supplies teacher completion, graph-aware
+replay, local discrimination, and off-neighborhood protection. LoRA is merged
+after each stage, so inference has no adapter bank or router.
 
 ## 1. Register official annotations
 
@@ -101,7 +105,7 @@ The calibration writes `gnn_stage0.pt`, empirical labels, a held-out-source
 summary, and a completion marker. A smoke calibration made with
 `--source-limit` is marked non-production and is rejected by the runner.
 
-## 5. Run the GNN method
+## 5. Run the full three-module method
 
 DEUS states that replay stores a fixed number of exemplars per class, but the
 main paper defers the exact number and pseudo-label details to Appendix A. Set
@@ -110,7 +114,7 @@ does not invent a default.
 
 ```bash
 EPC=<official_exemplars_per_class>
-OUT="$PWD/exps/owod/m-owodb/gnn/stage_1_k5"
+OUT="$PWD/exps/owod/m-owodb/full_three_module/stage_1_k5"
 python tools/owod/run_graph_local_increment.py \
   --coco-path "$PWD/data/coco" \
   --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
@@ -119,6 +123,10 @@ python tools/owod/run_graph_local_increment.py \
   --gnn-checkpoint "$CAL/gnn_stage0.pt" \
   --output-dir "$OUT" \
   --graph-k 5 --exemplars-per-class "$EPC" \
+  --neighbor-scoped-lora --lora-rank 8 \
+  --teacher-completion --teacher-score-threshold 0.5 \
+  --local-margin-coef 0.5 --local-margin 1.0 \
+  --off-projection-coef 0.1 --off-basis-rank 8 \
   --epochs 20 --batch-size 2 --num-workers 4 --eval-interval 5 \
   --gpus 0,1 --nproc-per-node 2 --master-port 29561
 ```
@@ -138,8 +146,9 @@ claiming an improvement.
 Top-K is an extra-budget controller, not a hard gate. Every previous class gets
 a small exemplar floor, while the GNN-selected classes receive additional
 images. The sampler fixes the replay exposure per epoch, and a frozen previous-
-stage Deformable DETR preserves old-class logits and boxes. The detector
-backbone itself is unchanged.
+stage Deformable DETR completes missing old foreground. A rank-8 stage-level
+LoRA and two graph-conditioned losses execute the constrained update. The
+detector backbone itself is frozen and unchanged.
 
 ```bash
 GNN="$CAL/gnn_stage0.pt"
@@ -150,59 +159,41 @@ python tools/owod/run_graph_local_increment.py \
   --output-dir "$OUT" --control graph \
   --graph-k 5 --graph-aggregation top_mean --graph-aggregation-top-n 3 \
   --base-exemplars-per-class 10 --risk-extra-exemplars-per-class 40 \
-  --replay-sampling-fraction 0.10 --old-class-distillation \
-  --distill-class-coef 2 --distill-bbox-coef 5 \
-  --lr 5e-5 --lr-backbone 5e-6 \
-  --epochs 10 --lr-drop 8 --eval-interval 2 \
+  --replay-sampling-fraction 0.10 \
+  --neighbor-scoped-lora --lora-rank 8 \
+  --teacher-completion --teacher-score-threshold 0.5 \
+  --local-margin-coef 0.5 --local-margin 1.0 \
+  --off-projection-coef 0.1 --off-basis-rank 8 \
+  --lr 1e-4 --epochs 20 --lr-drop 15 --eval-interval 5 \
   --batch-size 2 --num-workers 4 --gpus 0,1 --nproc-per-node 2
 ```
 
-Use a new output directory. `graph.json` records the per-class quotas and the
-robust GNN ranking; `run_config.json` records sampling, distillation, and
-learning-rate settings. This command is a pilot when the manifest is passed
+Use a new output directory. `graph.json` records per-class quotas, robust GNN
+ranking, and the protected off-neighborhood. `off_neighborhood_basis.pt` stores
+the projection basis. `checkpoint.pth` is resumable with LoRA parameters, while
+`checkpoint_merged.pth` is the plain Deformable DETR checkpoint for the next
+stage. This command is a pilot when the manifest is passed
 with `--allow-unverified-protocol` and must not be reported as paper-comparable.
 The repository also provides the same guarded command as
 `tools/owod/run_stage1_retention_pilot.sh`.
 
-## 6. Primary three-component ablation
+## 6. Primary three-module ablation
 
-The main ablation is internal to the GNN. It does not compare against cosine
-similarity. Train four GNN checkpoints from the same cached empirical harm
-artifact:
+The main ablation removes one macro module at a time while keeping the split,
+memory budget, seed, and training schedule fixed:
 
-```bash
-for ABLATION in full no_node_encoder no_message_passing no_ranking_loss; do
-  python tools/owod/calibrate_interference_gnn.py \
-    --coco_path "$PWD/data/coco" \
-    --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
-    --stage 0 \
-    --checkpoint "$PWD/exps/owod/m-owodb/deformable_detr_control/stage_0/checkpoint.pth" \
-    --output-dir "$CAL" --num_classes 91 \
-    --batch_size 1 --num_workers 4 --device cuda \
-    --sketch-max-images 12 --probe-max-images 12 --probe-steps 3 \
-    --gnn-epochs 400 --gnn-ablation "$ABLATION"
-done
-```
+- `Full`: GNN + LoRA + graph-conditioned objective.
+- `without GNN`: use cardinality-matched `--control random`, retaining the same
+  LoRA and objective.
+- `without LoRA`: use `--no-neighbor-scoped-lora --off-projection-coef 0`,
+  retaining GNN selection, teacher completion, replay, and local margin. The
+  LoRA-coordinate projection is necessarily absent with its parameterization.
+- `without graph-conditioned objective`: retain GNN and LoRA, use
+  `--no-teacher-completion --local-margin-coef 0 --off-projection-coef 0`.
 
-The four rows are:
-
-- `full`: node encoder + directed message passing + ranking loss.
-- `no_node_encoder`: a fixed parameter-free pooling replaces the learned node encoder.
-- `no_message_passing`: directed edge MLP sees node pairs without graph aggregation.
-- `no_ranking_loss`: retains continuous harm regression but removes pairwise ranking.
-
-The first run creates detector sketches and empirical harm labels. Later runs
-reuse those caches from the same `CAL` directory, so differences come from the
-GNN component rather than a new detector probe. The checkpoints are
-`gnn_stage0.pt`, `gnn_stage0_no_node_encoder.pt`,
-`gnn_stage0_no_message_passing.pt`, and `gnn_stage0_no_ranking_loss.pt`.
-
-Run the Stage 1 detector command once per checkpoint, changing only
-`--gnn-checkpoint` and `--output-dir`. Keep the detector checkpoint, Top-K,
-per-class exemplar count, seed, and training schedule identical.
-
-`--control random` and `--control global` remain optional replay sanity checks;
-they are not rows in the three-component GNN ablation table.
+Removing the GNN node encoder, message passing, or ranking loss is a secondary
+internal diagnostic. Cosine similarity is an optional neighborhood baseline,
+not a primary module ablation.
 
 ## 7. Logs and metrics
 

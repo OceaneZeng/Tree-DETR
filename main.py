@@ -25,6 +25,8 @@ import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+from models.graph_local import (freeze_for_class_ids, inject_decoder_lora,
+                                merge_decoder_lora)
 from util.checkpoint import matching_state_dict
 from util.experiment_log import (archive_log_file, experiment_log_path,
                                  prepare_log_file, start_file_logging,
@@ -88,6 +90,25 @@ def get_args_parser():
     parser.add_argument('--distill-bbox-coef', default=5.0, type=float)
     parser.add_argument('--distill-score-threshold', default=0.3, type=float)
     parser.add_argument('--distill-max-queries', default=20, type=int)
+    parser.add_argument('--neighbor-scoped-lora', action='store_true',
+                        help='train a temporary stage-level LoRA on the final decoder FFNs')
+    parser.add_argument('--lora-rank', default=8, type=int)
+    parser.add_argument('--lora-last-decoder-layers', default=2, type=int)
+    parser.add_argument('--trainable-class-ids', type=int, nargs='+', default=None,
+                        help='classifier rows trained together with the temporary LoRA')
+    parser.add_argument('--graph-local-class-ids', type=int, nargs='+', default=None,
+                        help='current and GNN-neighbor classes used by the local margin')
+    parser.add_argument('--local-margin-coef', default=0.0, type=float)
+    parser.add_argument('--local-margin', default=1.0, type=float)
+    parser.add_argument('--off-neighborhood-basis', default='', type=str)
+    parser.add_argument('--off-projection-coef', default=0.0, type=float)
+    parser.add_argument('--teacher-completion', action='store_true',
+                        help='complete missing old foreground with frozen-teacher pseudo labels')
+    parser.add_argument('--teacher-old-class-ids', type=int, nargs='+', default=None)
+    parser.add_argument('--teacher-score-threshold', default=0.5, type=float)
+    parser.add_argument('--teacher-duplicate-iou', default=0.7, type=float)
+    parser.add_argument('--teacher-ground-truth-iou', default=0.5, type=float)
+    parser.add_argument('--teacher-max-per-image', default=20, type=int)
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -241,8 +262,88 @@ def main(args):
 
     model_without_ddp = model
     teacher_model = None
+    classifier_hook_handles = []
+    off_neighborhood_basis = None
+    output_dir = Path(args.output_dir)
+
+    if args.neighbor_scoped_lora and args.with_tree:
+        raise ValueError('--neighbor-scoped-lora currently requires the Deformable DETR path')
+    if args.neighbor_scoped_lora and not args.trainable_class_ids:
+        raise ValueError('--neighbor-scoped-lora requires --trainable-class-ids')
+    if args.local_margin_coef > 0 and not args.graph_local_class_ids:
+        raise ValueError('--local-margin-coef requires --graph-local-class-ids')
+    if args.off_projection_coef > 0 and not args.neighbor_scoped_lora:
+        raise ValueError('--off-projection-coef requires --neighbor-scoped-lora')
+    if args.off_projection_coef > 0 and not args.off_neighborhood_basis:
+        raise ValueError('--off-projection-coef requires --off-neighborhood-basis')
+    if args.teacher_completion and not args.teacher_old_class_ids:
+        raise ValueError('--teacher-completion requires --teacher-old-class-ids')
+
+    if args.frozen_weights is not None:
+        checkpoint = load_local_checkpoint(args.frozen_weights)
+        model_without_ddp.detr.load_state_dict(checkpoint['model'])
+
+    # Load the previous-stage detector while it still has the plain Deformable
+    # DETR module structure. The frozen teacher must not contain current-stage
+    # LoRA factors or weights restored from an interrupted current-stage run.
+    if args.pretrained:
+        checkpoint = load_local_checkpoint(args.pretrained)
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
+        if getattr(args, 'reset_classifier', False):
+            classifier_keys = tuple(key for key in compatible
+                                    if key.startswith('class_embed.') or
+                                    key.startswith('transformer.decoder.class_embed.'))
+            for key in classifier_keys:
+                del compatible[key]
+            print(f'Discarded {len(classifier_keys)} pretrained classifier tensors.')
+        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
+        print(f'Loaded {len(compatible)} shape-compatible pretrained tensors only; skipped={skipped}.')
+        if missing_keys:
+            print('Missing Keys: {}'.format(missing_keys))
+        if unexpected_keys:
+            print('Unexpected Keys: {}'.format(unexpected_keys))
+
+    teacher_required = args.teacher_completion or args.old_class_distillation
+    if teacher_required:
+        if not args.pretrained:
+            raise ValueError('teacher completion/distillation requires --pretrained')
+        if args.old_class_distillation and not args.distill_old_class_ids:
+            raise ValueError('--old-class-distillation requires --distill-old-class-ids')
+        teacher_model = copy.deepcopy(model_without_ddp).to(device)
+        teacher_model.eval()
+        for parameter in teacher_model.parameters():
+            parameter.requires_grad_(False)
+        print('Enabled frozen previous-stage teacher:', json.dumps({
+            'completion_classes': args.teacher_old_class_ids or [],
+            'distillation_classes': args.distill_old_class_ids or [],
+        }, sort_keys=True))
+
+    if args.neighbor_scoped_lora:
+        wrappers = inject_decoder_lora(
+            model_without_ddp, rank=args.lora_rank,
+            last_n=args.lora_last_decoder_layers)
+        classifier_hook_handles, _trainable = freeze_for_class_ids(
+            model_without_ddp, args.trainable_class_ids)
+        print('Enabled neighbor-scoped stage LoRA:', json.dumps({
+            'rank': args.lora_rank,
+            'decoder_layers': args.lora_last_decoder_layers,
+            'wrapped_linears': len(wrappers),
+            'trainable_class_ids': sorted(set(args.trainable_class_ids)),
+            'graph_local_class_ids': sorted(set(args.graph_local_class_ids or [])),
+        }, sort_keys=True))
+
+    if args.off_neighborhood_basis:
+        off_neighborhood_basis = load_local_checkpoint(args.off_neighborhood_basis)
+        if isinstance(off_neighborhood_basis, dict):
+            off_neighborhood_basis = off_neighborhood_basis['basis']
+        if not torch.is_tensor(off_neighborhood_basis):
+            raise ValueError('--off-neighborhood-basis must contain a tensor or a basis entry')
+        off_neighborhood_basis = off_neighborhood_basis.to(device)
+        print('Loaded off-neighborhood basis:', tuple(off_neighborhood_basis.shape))
+
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
+    print('number of trainable params:', n_parameters)
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
@@ -319,6 +420,9 @@ def main(args):
             "params": [p for n, p in model_without_ddp.named_parameters()
                        if match_name_keywords(n, class_head_names) and p.requires_grad],
             "lr": args.lr * args.class_embed_lr_mult,
+            # Row masks freeze previous-class gradients. Disabling decay keeps
+            # those rows bitwise fixed even though the tensor is optimized.
+            "weight_decay": 0.0 if args.neighbor_scoped_lora else args.weight_decay,
         }
     ]
     if args.sgd:
@@ -339,41 +443,6 @@ def main(args):
         base_ds = get_coco_api_from_dataset(coco_val)
     else:
         base_ds = get_coco_api_from_dataset(dataset_val)
-
-    if args.frozen_weights is not None:
-        checkpoint = load_local_checkpoint(args.frozen_weights)
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
-
-    output_dir = Path(args.output_dir)
-    if args.pretrained:
-        checkpoint = load_local_checkpoint(args.pretrained)
-        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-        compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
-        if getattr(args, 'reset_classifier', False):
-            classifier_keys = tuple(key for key in compatible
-                                    if key.startswith('class_embed.') or
-                                    key.startswith('transformer.decoder.class_embed.'))
-            for key in classifier_keys:
-                del compatible[key]
-            print(f'Discarded {len(classifier_keys)} pretrained classifier tensors.')
-        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(compatible, strict=False)
-        print(f'Loaded {len(compatible)} shape-compatible pretrained tensors only; skipped={skipped}.')
-        if missing_keys:
-            print('Missing Keys: {}'.format(missing_keys))
-        if unexpected_keys:
-            print('Unexpected Keys: {}'.format(unexpected_keys))
-
-        if args.old_class_distillation:
-            if not args.distill_old_class_ids:
-                raise ValueError('--old-class-distillation requires --distill-old-class-ids')
-            teacher_model = copy.deepcopy(model_without_ddp).to(device)
-            teacher_model.eval()
-            for parameter in teacher_model.parameters():
-                parameter.requires_grad_(False)
-            print('Enabled frozen previous-stage distillation for {} old classes.'.format(
-                len(args.distill_old_class_ids)))
-    elif args.old_class_distillation:
-        raise ValueError('--old-class-distillation requires --pretrained')
 
     if args.resume:
         if args.resume.startswith('https'):
@@ -458,7 +527,18 @@ def main(args):
             distill_class_coef=args.distill_class_coef,
             distill_bbox_coef=args.distill_bbox_coef,
             distill_score_threshold=args.distill_score_threshold,
-            distill_max_queries=args.distill_max_queries)
+            distill_max_queries=args.distill_max_queries,
+            teacher_completion=args.teacher_completion,
+            teacher_old_class_ids=args.teacher_old_class_ids,
+            teacher_score_threshold=args.teacher_score_threshold,
+            teacher_duplicate_iou=args.teacher_duplicate_iou,
+            teacher_ground_truth_iou=args.teacher_ground_truth_iou,
+            teacher_max_per_image=args.teacher_max_per_image,
+            graph_local_class_ids=args.graph_local_class_ids,
+            local_margin_coef=args.local_margin_coef,
+            local_margin=args.local_margin,
+            off_neighborhood_basis=off_neighborhood_basis,
+            off_projection_coef=args.off_projection_coef)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -513,9 +593,24 @@ def main(args):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
     if args.output_dir and utils.is_main_process():
+        if args.neighbor_scoped_lora:
+            merged_count = merge_decoder_lora(
+                model_without_ddp, last_n=args.lora_last_decoder_layers)
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'epoch': args.epochs - 1,
+                'args': args,
+                'merged_lora_linears': merged_count,
+                'source_checkpoint': str(output_dir / 'checkpoint.pth'),
+            }, output_dir / 'checkpoint_merged.pth')
+            print('Merged {} LoRA linears into checkpoint_merged.pth'.format(merged_count))
         with (output_dir / 'training_complete.json').open('w') as f:
             json.dump({'epochs': args.epochs, 'last_epoch': args.epochs - 1,
-                       'training_time_seconds': int(total_time)}, f)
+                       'training_time_seconds': int(total_time),
+                       'merged_checkpoint': ('checkpoint_merged.pth'
+                                             if args.neighbor_scoped_lora else None)}, f)
+    for handle in classifier_hook_handles:
+        handle.remove()
     stop_file_logging(file_log_state)
 
 
