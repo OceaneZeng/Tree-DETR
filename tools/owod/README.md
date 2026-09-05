@@ -133,6 +133,37 @@ exemplar count, seed, and training schedule:
 The graph arm requires `--gnn-checkpoint`. Report at least three seeds before
 claiming an improvement.
 
+### Retention-aware Stage 1 pilot
+
+Top-K is an extra-budget controller, not a hard gate. Every previous class gets
+a small exemplar floor, while the GNN-selected classes receive additional
+images. The sampler fixes the replay exposure per epoch, and a frozen previous-
+stage Deformable DETR preserves old-class logits and boxes. The detector
+backbone itself is unchanged.
+
+```bash
+GNN="$CAL/gnn_stage0.pt"
+python tools/owod/run_graph_local_increment.py \
+  --coco-path "$PWD/data/coco" \
+  --manifest "$MAN" --allow-unverified-protocol \
+  --stage 1 --checkpoint "$BASE" --gnn-checkpoint "$GNN" \
+  --output-dir "$OUT" --control graph \
+  --graph-k 5 --graph-aggregation top_mean --graph-aggregation-top-n 3 \
+  --base-exemplars-per-class 10 --risk-extra-exemplars-per-class 40 \
+  --replay-sampling-fraction 0.10 --old-class-distillation \
+  --distill-class-coef 2 --distill-bbox-coef 5 \
+  --lr 5e-5 --lr-backbone 5e-6 \
+  --epochs 10 --lr-drop 8 --eval-interval 2 \
+  --batch-size 2 --num-workers 4 --gpus 0,1 --nproc-per-node 2
+```
+
+Use a new output directory. `graph.json` records the per-class quotas and the
+robust GNN ranking; `run_config.json` records sampling, distillation, and
+learning-rate settings. This command is a pilot when the manifest is passed
+with `--allow-unverified-protocol` and must not be reported as paper-comparable.
+The repository also provides the same guarded command as
+`tools/owod/run_stage1_retention_pilot.sh`.
+
 ## 6. Primary three-component ablation
 
 The main ablation is internal to the GNN. It does not compare against cosine

@@ -69,18 +69,36 @@ def get_parser() -> argparse.ArgumentParser:
                         help="required for the graph arm; random/global are matched controls")
     parser.add_argument("--graph-k", default=5, type=int)
     parser.add_argument("--gnn-min-score", default=0.0, type=float)
+    parser.add_argument("--graph-aggregation", choices=("max", "top_mean"),
+                        default="top_mean")
+    parser.add_argument("--graph-aggregation-top-n", default=3, type=int)
     parser.add_argument("--graph-feature-device", default="cuda:0",
                         help="device used to extract detector gradient sketches")
     parser.add_argument("--sketch-max-images", default=12, type=int)
     parser.add_argument("--sketch-batch-size", default=1, type=int)
     parser.add_argument("--last-decoder-layers", default=2, type=int)
     parser.add_argument("--exemplars-per-class", default=None, type=int,
-                        help="required for incremental tasks; use the value from the official protocol")
+                        help="uniform selected-class quota (alternative to adaptive quotas)")
+    parser.add_argument("--base-exemplars-per-class", default=0, type=int,
+                        help="minimum replay quota for every previous class")
+    parser.add_argument("--risk-extra-exemplars-per-class", default=0, type=int,
+                        help="additional replay quota for GNN-selected high-risk classes")
+    parser.add_argument("--replay-sampling-fraction", default=0.0, type=float,
+                        help="fraction of each detector epoch sampled from replay images")
     parser.add_argument("--control", choices=("graph", "random", "global"), default="graph")
     parser.add_argument("--eval-interval", default=5, type=int)
     parser.add_argument("--print-freq", default=100, type=int)
     parser.add_argument("--eval-print-freq", default=100, type=int)
     parser.add_argument("--lr-drop", default=15, type=int)
+    parser.add_argument("--lr", default=None, type=float,
+                        help="incremental detector learning rate")
+    parser.add_argument("--lr-backbone", default=None, type=float,
+                        help="incremental backbone learning rate")
+    parser.add_argument("--old-class-distillation", action="store_true")
+    parser.add_argument("--distill-class-coef", default=2.0, type=float)
+    parser.add_argument("--distill-bbox-coef", default=5.0, type=float)
+    parser.add_argument("--distill-score-threshold", default=0.3, type=float)
+    parser.add_argument("--distill-max-queries", default=20, type=int)
     parser.add_argument("--unknown-threshold", default=0.5, type=float)
     parser.add_argument("--lightweight", action="store_true")
     parser.add_argument("--no-random-crop", action="store_true")
@@ -93,12 +111,13 @@ def get_parser() -> argparse.ArgumentParser:
 
 def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
                            new_ids: list[int], old_ids: list[int], k: int,
-                           min_score: float = 0.0) -> tuple[list[int], dict]:
+                           min_score: float = 0.0, aggregation: str = "top_mean",
+                           aggregation_top_n: int = 3) -> tuple[list[int], dict]:
     """Select a stage-level top-k over old classes only.
 
-    A target's risk is the maximum directed edge from any current-stage class.
-    This treats ``k`` as the total replay neighborhood size, rather than taking
-    k neighbors from all classes for each source and filtering afterwards.
+    A target's risk aggregates directed edges from current-stage classes. This
+    treats ``k`` as the total high-risk neighborhood size, rather than taking k
+    neighbors from every source and filtering afterwards.
     """
     if edge_scores.ndim != 2 or edge_scores.shape[0] != edge_scores.shape[1]:
         raise ValueError("edge_scores must be a square matrix")
@@ -112,17 +131,28 @@ def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
 
     target_ids = list(dict.fromkeys(int(class_id) for class_id in old_ids))
     source_scores: dict[str, list[list[float | int]]] = {}
-    aggregate = {target: float("-inf") for target in target_ids}
+    target_scores = {target: [] for target in target_ids}
     detached = edge_scores.detach().float().cpu()
     for source in new_ids:
         ranked = []
         for target in target_ids:
             score = float(detached[index[int(source)], index[target]])
-            aggregate[target] = max(aggregate[target], score)
+            target_scores[target].append(score)
             ranked.append([target, score])
         ranked.sort(key=lambda item: (-item[1], item[0]))
         source_scores[str(int(source))] = ranked
 
+    if aggregation not in {"max", "top_mean"}:
+        raise ValueError(f"unsupported graph aggregation: {aggregation}")
+    top_n = max(1, int(aggregation_top_n))
+    aggregate = {}
+    for target, values in target_scores.items():
+        ordered_values = sorted(values, reverse=True)
+        if aggregation == "max":
+            aggregate[target] = ordered_values[0]
+        else:
+            used = ordered_values[:top_n]
+            aggregate[target] = sum(used) / len(used)
     aggregate_ranking = sorted(
         ([target, score] for target, score in aggregate.items() if score > min_score),
         key=lambda item: (-item[1], item[0]),
@@ -130,7 +160,8 @@ def rank_stage_old_classes(class_ids: list[int], edge_scores: torch.Tensor,
     selected = [int(target) for target, _score in aggregate_ranking[:max(0, int(k))]]
     return selected, {
         "selection_scope": "stage_top_k_old_classes",
-        "aggregation": "max_over_new_classes",
+        "aggregation": ("max_over_new_classes" if aggregation == "max"
+                        else f"mean_top_{top_n}_over_new_classes"),
         "requested_k": int(k),
         "selected_k": len(selected),
         "min_score": float(min_score),
@@ -159,7 +190,9 @@ def select_neighbors(args, features: dict[int, torch.Tensor], new_ids: list[int]
     with torch.no_grad():
         edge_prob = gnn(compressed)["edge_prob"]
     selected, details = rank_stage_old_classes(
-        ordered, edge_prob, new_ids, old_ids, args.graph_k, args.gnn_min_score)
+        ordered, edge_prob, new_ids, old_ids, args.graph_k, args.gnn_min_score,
+        getattr(args, "graph_aggregation", "top_mean"),
+        getattr(args, "graph_aggregation_top_n", 3))
     return selected, {"estimator": "trainable_class_interference_gnn",
                       "checkpoint": str(args.gnn_checkpoint.resolve()),
                       "feature_source": "detector_decoder_ffn_gradient_sketch",
@@ -247,6 +280,23 @@ def build_main_command(args, train_ann: Path, val_ann: Path, arm_dir: Path,
             "--print-freq", str(args.print_freq),
             "--eval-print-freq", str(args.eval_print_freq),
             "--no-file-log"]
+    if args.lr is not None:
+        main += ["--lr", str(args.lr)]
+    if args.lr_backbone is not None:
+        main += ["--lr_backbone", str(args.lr_backbone)]
+    if args.replay_sampling_fraction > 0:
+        main += ["--replay-sampling-fraction", str(args.replay_sampling_fraction)]
+    if args.old_class_distillation:
+        if not old_ids:
+            raise ValueError("old-class distillation requires a stage with previous classes")
+        main += [
+            "--old-class-distillation",
+            "--distill-old-class-ids", *[str(value) for value in old_ids],
+            "--distill-class-coef", str(args.distill_class_coef),
+            "--distill-bbox-coef", str(args.distill_bbox_coef),
+            "--distill-score-threshold", str(args.distill_score_threshold),
+            "--distill-max-queries", str(args.distill_max_queries),
+        ]
     if old_ids:
         main += ["--owod-previous-class-ids", *[str(value) for value in old_ids]]
     if args.resume:
@@ -298,6 +348,13 @@ def stream_process(command: list[str], output_dir: Path, env: dict[str, str],
 
 def main() -> int:
     args = get_parser().parse_args()
+    if not 0.0 <= args.replay_sampling_fraction < 1.0:
+        raise SystemExit("--replay-sampling-fraction must be in [0, 1)")
+    adaptive_quota = (args.base_exemplars_per_class > 0 or
+                      args.risk_extra_exemplars_per_class > 0)
+    if adaptive_quota and args.exemplars_per_class is not None:
+        raise SystemExit(
+            "use either --exemplars-per-class or the base/risk adaptive quotas, not both")
     args.coco_path = args.coco_path.resolve()
     args.manifest = args.manifest.resolve()
     args.checkpoint = args.checkpoint.resolve()
@@ -354,19 +411,36 @@ def main() -> int:
             features, feature_info = detector_gradient_features(
                 args, current_ann, replay_ann, new_ids, old_ids)
             selected, graph_info = select_neighbors(args, features, new_ids, old_ids)
-        if args.stage == 0 or not selected:
+        if args.stage == 0 or (not selected and args.base_exemplars_per_class <= 0):
             train_ann = current_ann if args.stage > 0 else replay_ann
             replay_info = {"replay_classes": selected, "replay_images": 0,
                            "total_images": len(read_json(train_ann).get("images", []))}
         else:
-            if args.exemplars_per_class is None or args.exemplars_per_class <= 0:
+            use_adaptive_quotas = (args.base_exemplars_per_class > 0 or
+                                   args.risk_extra_exemplars_per_class > 0)
+            if not use_adaptive_quotas and (
+                    args.exemplars_per_class is None or args.exemplars_per_class <= 0):
                 raise SystemExit(
                     "incremental replay requires --exemplars-per-class from the official "
                     "OWOD recipe; no paper value is assumed")
+            if args.base_exemplars_per_class < 0 or args.risk_extra_exemplars_per_class < 0:
+                raise SystemExit("replay exemplar quotas must be non-negative")
+            class_quotas = None
+            replay_classes = selected
+            uniform_quota = int(args.exemplars_per_class or 0)
+            if use_adaptive_quotas:
+                class_quotas = {
+                    class_id: int(args.base_exemplars_per_class)
+                    for class_id in old_ids if args.base_exemplars_per_class > 0
+                }
+                for class_id in selected:
+                    class_quotas[class_id] = (class_quotas.get(class_id, 0) +
+                                              int(args.risk_extra_exemplars_per_class))
+                replay_classes = sorted(class_quotas)
             train_ann = annotation_dir / f"train_{args.control}.json"
             replay_info = build_increment_annotation(
-                current_ann, replay_ann, selected, args.exemplars_per_class,
-                train_ann, args.seed)
+                current_ann, replay_ann, replay_classes, uniform_quota,
+                train_ann, args.seed, class_quotas=class_quotas)
 
         if features is not None:
             gnn, _metadata = load_gnn_checkpoint(args.gnn_checkpoint, device="cpu")
@@ -394,6 +468,18 @@ def main() -> int:
                 "active_classes": active_ids, "selected_replay_classes": selected,
                 "graph_estimator": "gnn" if args.control == "graph" else "none",
                 "exemplars_per_class": args.exemplars_per_class,
+                "base_exemplars_per_class": args.base_exemplars_per_class,
+                "risk_extra_exemplars_per_class": args.risk_extra_exemplars_per_class,
+                "replay_sampling_fraction": args.replay_sampling_fraction,
+                "old_class_distillation": args.old_class_distillation,
+                "distill_class_coef": args.distill_class_coef,
+                "distill_bbox_coef": args.distill_bbox_coef,
+                "distill_score_threshold": args.distill_score_threshold,
+                "distill_max_queries": args.distill_max_queries,
+                "graph_aggregation": args.graph_aggregation,
+                "graph_aggregation_top_n": args.graph_aggregation_top_n,
+                "lr": args.lr,
+                "lr_backbone": args.lr_backbone,
                 "protocol_validation": manifest.get("validation_mode", "official"),
                 "paper_comparable": bool(manifest.get("paper_comparable", False)),
                 "checkpoint": str(args.checkpoint),

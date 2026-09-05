@@ -19,7 +19,9 @@ from .lora import (
     merge_decoder_lora,
 )
 from .losses import weighted_detection_loss
-from .replay import build_increment_annotation, select_replay_images
+from .distillation import old_class_distillation_losses
+from .replay import (build_increment_annotation, select_replay_images,
+                     select_replay_images_by_quota)
 
 __all__ = [
     "LoRALinear",
@@ -35,8 +37,10 @@ __all__ = [
     "load_gnn_checkpoint",
     "lora_delta_vector",
     "merge_decoder_lora",
+    "old_class_distillation_losses",
     "select_gnn_neighbors",
     "select_replay_images",
+    "select_replay_images_by_quota",
     "save_gnn_checkpoint",
     "weighted_detection_loss",
 ]

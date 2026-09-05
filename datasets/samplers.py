@@ -72,6 +72,62 @@ class DistributedSampler(Sampler):
         self.epoch = epoch
 
 
+class ReplayBalancedSampler(Sampler):
+    """Sample a fixed replay fraction on every distributed rank each epoch."""
+
+    def __init__(self, dataset, replay_indices, replay_fraction=0.25,
+                 num_replicas=None, rank=None, seed=0):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        if not 0.0 < float(replay_fraction) < 1.0:
+            raise ValueError("replay_fraction must be between zero and one")
+        replay = sorted({int(index) for index in replay_indices})
+        current = sorted(set(range(len(dataset))) - set(replay))
+        if not replay or not current:
+            raise ValueError("balanced replay requires both replay and current samples")
+        self.dataset = dataset
+        self.replay_indices = replay
+        self.current_indices = current
+        self.replay_fraction = float(replay_fraction)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = int(math.ceil(len(dataset) / self.num_replicas))
+        self.replay_per_rank = max(1, int(round(self.num_samples * self.replay_fraction)))
+        self.current_per_rank = self.num_samples - self.replay_per_rank
+
+    @staticmethod
+    def _draw(pool, count, generator):
+        result = []
+        while len(result) < count:
+            order = torch.randperm(len(pool), generator=generator).tolist()
+            result.extend(pool[index] for index in order)
+        return result[:count]
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        replay = self._draw(
+            self.replay_indices, self.replay_per_rank * self.num_replicas, generator)
+        current = self._draw(
+            self.current_indices, self.current_per_rank * self.num_replicas, generator)
+        start_replay = self.rank * self.replay_per_rank
+        start_current = self.rank * self.current_per_rank
+        local = (replay[start_replay:start_replay + self.replay_per_rank] +
+                 current[start_current:start_current + self.current_per_rank])
+        order = torch.randperm(len(local), generator=generator).tolist()
+        return iter([local[index] for index in order])
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+
 class NodeDistributedSampler(Sampler):
     """Sampler that restricts data loading to a subset of the dataset.
     It is especially useful in conjunction with

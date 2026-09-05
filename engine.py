@@ -21,19 +21,26 @@ import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
+from models.graph_local.distillation import old_class_distillation_losses
 from models.owod_metrics import compute_owod_metrics, harmonic_score, table1_summary
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    print_freq: int = 100):
+                    print_freq: int = 100, teacher: torch.nn.Module | None = None,
+                    distill_old_class_ids: Iterable[int] | None = None,
+                    distill_class_coef: float = 2.0,
+                    distill_bbox_coef: float = 5.0,
+                    distill_score_threshold: float = 0.3,
+                    distill_max_queries: int = 20):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(
         delimiter="  ",
         visible_meters={"lr", "class_error", "grad_norm", "loss", "loss_ce",
-                        "loss_bbox", "loss_giou"})
+                        "loss_bbox", "loss_giou", "loss_distill_cls",
+                        "loss_distill_bbox", "distill_queries"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -42,9 +49,24 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for _ in metric_logger.log_every(range(len(data_loader)), max(1, int(print_freq)), header):
+        teacher_outputs = None
+        if teacher is not None:
+            with torch.no_grad():
+                teacher_outputs = teacher(samples)
         outputs = model(samples)
         loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
+        weight_dict = dict(criterion.weight_dict)
+        distill_query_count = 0
+        if teacher is not None:
+            distill_losses, distill_query_count = old_class_distillation_losses(
+                outputs, teacher_outputs, distill_old_class_ids or [],
+                score_threshold=distill_score_threshold,
+                max_queries_per_image=distill_max_queries)
+            loss_dict.update(distill_losses)
+            weight_dict.update({
+                'loss_distill_cls': float(distill_class_coef),
+                'loss_distill_bbox': float(distill_bbox_coef),
+            })
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         # reduce losses over all GPUs for logging purposes
@@ -74,6 +96,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
+        if teacher is not None:
+            metric_logger.update(distill_queries=float(distill_query_count))
         samples, targets = prefetcher.next()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

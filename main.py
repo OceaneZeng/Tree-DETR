@@ -79,6 +79,15 @@ def get_args_parser():
                         help='Previously learned category IDs for OWOD Previous AP50')
     parser.add_argument('--owod-current-class-ids', type=int, nargs='+', default=None,
                         help='Current-stage category IDs for OWOD Current AP50')
+    parser.add_argument('--replay-sampling-fraction', default=0.0, type=float,
+                        help='fixed fraction of each training epoch drawn from tagged replay images')
+    parser.add_argument('--old-class-distillation', action='store_true',
+                        help='preserve frozen previous-stage outputs on old classes')
+    parser.add_argument('--distill-old-class-ids', type=int, nargs='+', default=None)
+    parser.add_argument('--distill-class-coef', default=2.0, type=float)
+    parser.add_argument('--distill-bbox-coef', default=5.0, type=float)
+    parser.add_argument('--distill-score-threshold', default=0.3, type=float)
+    parser.add_argument('--distill-max-queries', default=20, type=int)
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -231,13 +240,34 @@ def main(args):
     criterion.to(device)
 
     model_without_ddp = model
+    teacher_model = None
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
-    if args.distributed:
+    replay_indices = [
+        index for index, image_id in enumerate(getattr(dataset_train, 'ids', []))
+        if bool(dataset_train.coco.imgs[int(image_id)].get('owod_replay', False))
+    ]
+    if args.replay_sampling_fraction > 0:
+        sampler_train = samplers.ReplayBalancedSampler(
+            dataset_train, replay_indices,
+            replay_fraction=args.replay_sampling_fraction,
+            num_replicas=utils.get_world_size(), rank=utils.get_rank(), seed=args.seed)
+        print('Balanced replay sampler:', json.dumps({
+            'tagged_replay_images': len(replay_indices),
+            'current_images': len(dataset_train) - len(replay_indices),
+            'requested_fraction': args.replay_sampling_fraction,
+            'samples_per_rank': len(sampler_train),
+            'replay_samples_per_rank': sampler_train.replay_per_rank,
+        }, sort_keys=True))
+        if args.distributed:
+            sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
+        else:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    elif args.distributed:
         if args.cache_mode:
             sampler_train = samplers.NodeDistributedSampler(dataset_train)
             sampler_val = samplers.NodeDistributedSampler(dataset_val, shuffle=False)
@@ -333,6 +363,18 @@ def main(args):
         if unexpected_keys:
             print('Unexpected Keys: {}'.format(unexpected_keys))
 
+        if args.old_class_distillation:
+            if not args.distill_old_class_ids:
+                raise ValueError('--old-class-distillation requires --distill-old-class-ids')
+            teacher_model = copy.deepcopy(model_without_ddp).to(device)
+            teacher_model.eval()
+            for parameter in teacher_model.parameters():
+                parameter.requires_grad_(False)
+            print('Enabled frozen previous-stage distillation for {} old classes.'.format(
+                len(args.distill_old_class_ids)))
+    elif args.old_class_distillation:
+        raise ValueError('--old-class-distillation requires --pretrained')
+
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -411,7 +453,12 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm,
-            print_freq=args.print_freq)
+            print_freq=args.print_freq, teacher=teacher_model,
+            distill_old_class_ids=args.distill_old_class_ids,
+            distill_class_coef=args.distill_class_coef,
+            distill_bbox_coef=args.distill_bbox_coef,
+            distill_score_threshold=args.distill_score_threshold,
+            distill_max_queries=args.distill_max_queries)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']

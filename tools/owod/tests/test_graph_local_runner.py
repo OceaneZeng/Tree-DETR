@@ -7,10 +7,13 @@ import numpy as np
 import torch
 
 from engine import _coco_ap50_for_categories
+from datasets.samplers import ReplayBalancedSampler
+from models.graph_local.distillation import old_class_distillation_losses
 from models.graph_local.gnn import ClassInterferenceGNN, save_gnn_checkpoint
 from models.graph_local.replay import build_increment_annotation
 from tools.owod.calibrate_interference_gnn import resolve_gnn_ablation, source_masks
 from tools.owod.run_graph_local_increment import (random_neighbors,
+                                                   build_main_command,
                                                    get_parser,
                                                    rank_stage_old_classes,
                                                    select_neighbors,
@@ -27,12 +30,28 @@ def test_stage_ranking_only_selects_old_classes_and_treats_k_as_total():
     ])
 
     selected, details = rank_stage_old_classes(
-        class_ids, scores, new_ids=[10, 11], old_ids=[1, 2], k=2)
+        class_ids, scores, new_ids=[10, 11], old_ids=[1, 2], k=2,
+        aggregation="max")
 
     assert selected == [1, 2]
     assert details["selection_scope"] == "stage_top_k_old_classes"
     assert details["selected_k"] == 2
     assert set(selected).issubset({1, 2})
+
+
+def test_top_mean_aggregation_is_robust_to_one_source_outlier():
+    scores = torch.tensor([
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.9, 0.6, 0.0, 0.0, 0.0],
+        [0.0, 0.6, 0.0, 0.0, 0.0],
+        [0.0, 0.6, 0.0, 0.0, 0.0],
+    ])
+    selected, details = rank_stage_old_classes(
+        [1, 2, 10, 11, 12], scores, new_ids=[10, 11, 12], old_ids=[1, 2],
+        k=1, aggregation="top_mean", aggregation_top_n=3)
+    assert selected == [2]
+    assert details["aggregation"] == "mean_top_3_over_new_classes"
 
 
 def test_random_control_can_match_graph_neighborhood_size():
@@ -52,6 +71,24 @@ def test_resume_defaults_to_none_instead_of_current_directory():
     ])
     assert args.resume is None
     assert args.gnn_checkpoint is None
+
+
+def test_retention_options_are_forwarded_to_detector_command():
+    args = get_parser().parse_args([
+        "--coco-path", "coco", "--manifest", "manifest.json", "--stage", "1",
+        "--checkpoint", "base.pth", "--output-dir", "out",
+        "--replay-sampling-fraction", "0.1", "--old-class-distillation",
+        "--lr", "5e-5", "--lr-backbone", "5e-6",
+    ])
+    command = build_main_command(
+        args, Path("train.json"), Path("val.json"), Path("arm"),
+        active_ids=[1, 2, 10], old_ids=[1, 2], reset_classifier=False)
+    joined = " ".join(command)
+    assert "--replay-sampling-fraction 0.1" in joined
+    assert "--old-class-distillation" in joined
+    assert "--distill-old-class-ids 1 2" in joined
+    assert "--lr 5e-05" in joined
+    assert "--lr_backbone 5e-06" in joined
 
 
 def test_primary_ablations_disable_exactly_one_gnn_component():
@@ -198,3 +235,66 @@ def test_replay_merge_deduplicates_annotations_and_unions_categories():
 
     assert len(combined["annotations"]) == 2
     assert {category["id"] for category in combined["categories"]} == {1, 2}
+
+
+def test_adaptive_replay_uses_base_and_risk_quotas_and_tags_images():
+    categories = [{"id": value, "name": str(value)} for value in (1, 2, 10)]
+    old_images = [{"id": value, "file_name": f"{value}.jpg"} for value in range(1, 9)]
+    base = {
+        "images": old_images,
+        "annotations": [
+            {"id": value, "image_id": value, "category_id": 1 if value <= 4 else 2,
+             "bbox": [0, 0, 2, 2]}
+            for value in range(1, 9)
+        ],
+        "categories": categories,
+    }
+    new = {
+        "images": [{"id": 20, "file_name": "20.jpg"}],
+        "annotations": [{"id": 20, "image_id": 20, "category_id": 10,
+                         "bbox": [0, 0, 2, 2]}],
+        "categories": categories,
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "adaptive.json"
+        info = build_increment_annotation(
+            new, base, [1, 2], 0, output, class_quotas={1: 3, 2: 1})
+        combined = json.loads(output.read_text(encoding="utf-8"))
+
+    assert info["class_quotas"] == {"1": 3, "2": 1}
+    assert info["replay_images"] == 4
+    assert sum(bool(image["owod_replay"]) for image in combined["images"]) == 4
+
+
+def test_balanced_replay_sampler_keeps_fraction_on_each_rank():
+    dataset = list(range(100))
+    replay = list(range(10))
+    rank0 = ReplayBalancedSampler(dataset, replay, 0.25, num_replicas=2, rank=0, seed=42)
+    rank1 = ReplayBalancedSampler(dataset, replay, 0.25, num_replicas=2, rank=1, seed=42)
+    for sampler in (rank0, rank1):
+        indices = list(iter(sampler))
+        assert len(indices) == 50
+        assert sum(index in replay for index in indices) == 12
+
+
+def test_old_class_distillation_is_zero_at_initialization_and_detects_drift():
+    teacher = {
+        "pred_logits": torch.tensor([[[2.0, -1.0], [0.5, -2.0]]]),
+        "pred_boxes": torch.tensor([[[0.5, 0.5, 0.2, 0.2], [0.2, 0.2, 0.1, 0.1]]]),
+    }
+    student = {key: value.clone().requires_grad_(True) for key, value in teacher.items()}
+    equal, count = old_class_distillation_losses(
+        student, teacher, [0], score_threshold=0.0, max_queries_per_image=2)
+    assert count == 2
+    assert abs(float(equal["loss_distill_cls"])) < 1e-6
+    assert abs(float(equal["loss_distill_bbox"])) < 1e-6
+
+    shifted = {key: value.clone().requires_grad_(True) for key, value in teacher.items()}
+    shifted["pred_logits"] = (shifted["pred_logits"] + 1.0).detach().requires_grad_(True)
+    shifted["pred_boxes"] = (shifted["pred_boxes"] + 0.1).detach().requires_grad_(True)
+    drift, _ = old_class_distillation_losses(
+        shifted, teacher, [0], score_threshold=0.0, max_queries_per_image=2)
+    total = drift["loss_distill_cls"] + drift["loss_distill_bbox"]
+    assert float(total) > 0
+    total.backward()
+    assert shifted["pred_logits"].grad is not None
