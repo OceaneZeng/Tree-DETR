@@ -25,8 +25,10 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONPATH="$ROOT/models/ops:$ROOT:${PYTHONPATH:-}"
+TORCH_LIB="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"
+export LD_LIBRARY_PATH="$TORCH_LIB:${LD_LIBRARY_PATH:-}"
 
-python -c 'import MultiScaleDeformableAttention; print("MSDA:", MultiScaleDeformableAttention.__file__)'
+python -c 'import torch; import MultiScaleDeformableAttention as msda; print("PyTorch:", torch.__version__); print("MSDA:", msda.__file__)'
 
 python tools/owod/run_graph_local_increment.py \
   --coco-path "$ROOT/data/coco" \
