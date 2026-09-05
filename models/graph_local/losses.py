@@ -45,10 +45,17 @@ def local_margin_loss(outputs: Dict[str, torch.Tensor], targets: Sequence[Dict],
                     if int(label) in positions]
         if not selected:
             continue
-        selected_tensor = torch.as_tensor(
+        # HungarianMatcher returns CPU indices (via scipy) even when targets
+        # and logits live on CUDA. Index each source tensor on its own device,
+        # then move only the resolved query indices to the logits device.
+        source_selection = torch.as_tensor(
+            selected, device=source_indices.device, dtype=torch.long)
+        target_selection = torch.as_tensor(
             selected, device=labels.device, dtype=torch.long)
-        matched_logits = logits[batch_index, source_indices[selected_tensor]][:, local]
-        matched_labels = labels[selected_tensor]
+        matched_queries = source_indices[source_selection].to(logits.device)
+        local_tensor = torch.as_tensor(local, device=logits.device, dtype=torch.long)
+        matched_logits = logits[batch_index, matched_queries].index_select(1, local_tensor)
+        matched_labels = labels[target_selection]
         true_positions = torch.as_tensor(
             [positions[int(label)] for label in matched_labels.tolist()],
             device=matched_logits.device, dtype=torch.long)
