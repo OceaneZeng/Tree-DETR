@@ -1,9 +1,11 @@
 import json
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.owod.run_stage1_diagnostics import (ARM_NAMES, build_command, load_source,
                                                main, metric_rows, split_command)
@@ -119,6 +121,27 @@ class DiagnosticTests(unittest.TestCase):
             (source / "graph/run_config.json").write_text(json.dumps(recorded))
             with self.assertRaisesRegex(ValueError, "fresh Stage 1"):
                 load_source(source)
+
+    def test_training_launch_isolated_and_failure_does_not_start_d2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.make_source(directory)
+            output = Path(directory) / "outputs"
+            process = mock.MagicMock()
+            process.__enter__.return_value = process
+            process.stdout = iter(["Received Signals.SIGHUP\n"])
+            process.wait.return_value = 1
+            module = "tools.owod.run_stage1_diagnostics"
+            with mock.patch(module + ".training_environment", return_value={}), \
+                    mock.patch(module + ".subprocess.Popen", return_value=process) as launch, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = main(["--source-run", str(source), "--output-dir", str(output)])
+            self.assertEqual(code, 1)
+            launch.assert_called_once()
+            self.assertEqual(launch.call_args.kwargs["start_new_session"], os.name == "posix")
+            self.assertFalse((output / ARM_NAMES["d2"]).exists())
+            log = (output / ARM_NAMES["d1"] / "graph/train.log").read_text()
+            self.assertIn("Received Signals.SIGHUP", log)
+            self.assertIn("diagnostic exit 1", log)
 
 
 if __name__ == "__main__":

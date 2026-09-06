@@ -24,7 +24,7 @@ python tools/owod/run_stage1_diagnostics.py --dry-run
 确认 GPU 0、1 可用后，一次启动两组，脚本按 D1、D2 顺序运行，不会同时抢占两张卡。
 
 ```bash
-nohup python -u tools/owod/run_stage1_diagnostics.py --experiment both \
+nohup setsid python -u tools/owod/run_stage1_diagnostics.py --experiment both \
   > stage1_diagnostics_launcher.log 2>&1 < /dev/null &
 echo "launcher PID: $!"
 ```
@@ -54,11 +54,15 @@ python tools/owod/run_stage1_diagnostics.py --summarize
 确认旧进程已经结束后执行：
 
 ```bash
-nohup python -u tools/owod/run_stage1_diagnostics.py --experiment both --resume \
+nohup setsid python -u tools/owod/run_stage1_diagnostics.py --experiment both --resume \
   >> stage1_diagnostics_launcher.log 2>&1 < /dev/null &
 ```
 
 脚本跳过已完成的实验，恢复中断组自己的 checkpoint；教师不会变成中断组的模型。输入内容或计划改变时会拒绝续跑。若在产生第一个 checkpoint 前启动失败，应排除错误，再使用新的 `--output-dir`；不要把 D0 权重当作 D1/D2 的 resume 权重。
+
+如果日志出现 `Received Signals.SIGHUP`，表示进程收到外部挂断信号，具体来源可能是终端/SSH 会话结束或外部发信号，日志本身不能唯一确定原因。Torchrun 会安装自己的信号处理器，单独 nohup 并不总能隔离终端会话的影响。上面的 setsid 为整个启动器建立独立会话；新版脚本也为训练子进程创建独立 POSIX 会话。这不屏蔽管理员主动终止进程或系统资源策略。
+
+每个完整 epoch 结束后保存 checkpoint，轮内中断需要重跑当前轮。原有 checkpoint 不记录所有随机数状态，续跑不会逐步复现一条未中断轨迹；实验记录应注明中断轮数。若运行在非默认目录（例如 `stage1_diagnostics_v2`），启动、续跑和汇总必须都传入同一个 `--output-dir`。
 
 ## 把结果发回来
 

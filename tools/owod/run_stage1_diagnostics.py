@@ -214,8 +214,11 @@ def main(argv=None):
         # Capture distributed startup errors as well as the rank-zero training log.
         with (output / "train.log").open("a", encoding="utf-8", buffering=1) as log:
             log.write("\n===== diagnostic launch =====\n" + shlex.join(command) + "\n")
+            # Torchrun installs its own SIGHUP handler even under nohup.
+            # A separate POSIX session avoids terminal-session hangup signals.
             with subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
+                                  stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                  start_new_session=(os.name == "posix")) as process:
                 for line in process.stdout:
                     print(line, end="", flush=True)
                     log.write(line)
