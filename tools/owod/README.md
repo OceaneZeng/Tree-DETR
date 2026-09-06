@@ -177,6 +177,44 @@ with `--allow-unverified-protocol` and must not be reported as paper-comparable.
 The repository also provides the same guarded command as
 `tools/owod/run_stage1_retention_pilot.sh`.
 
+### Matched Stage 1 diagnostics
+
+After the retention pilot completes, run D1 (rank-8 LoRA without margin or
+projection) and D2 (ordinary detector fine-tuning without those losses).
+Both reuse the pilot's exact training annotation, selected graph neighborhood,
+previous-stage teacher, sampling fraction, seed and learning-rate schedule.
+No graph calibration or replay selection is repeated.
+
+```bash
+python tools/owod/run_stage1_diagnostics.py --dry-run
+python -u tools/owod/run_stage1_diagnostics.py --experiment both
+python tools/owod/run_stage1_diagnostics.py --summarize
+```
+
+Activate the same `tree-detr` environment first. The default source is
+`exps/owod/m-owodb/order0/pilot_unverified/full_three_module_stage1_v1`;
+the destination is its sibling `stage1_diagnostics_v1`. Override with
+`--source-run` and `--output-dir` when needed. D1 and D2 run sequentially on
+GPUs `0,1`; each retains the source's 20-epoch schedule with evaluation every
+5 epochs. `--experiment d1` or `--experiment d2` runs one arm.
+
+The launcher validates the source command against the recorded configuration,
+hashes its input files, and records each arm's `diagnostic_plan.json`.
+Each arm writes `graph/train.log`, `graph/metrics.jsonl` and checkpoints.
+`--summarize` reads completed evaluation rows even while training is running,
+with AP differences against D0 at the same epoch.
+
+After an interruption, use the same command with `--resume`. Completed arms
+are skipped; incomplete arms resume their own `graph/checkpoint.pth`, while
+the teacher remains the original Stage 0 model. Changed plans or input hashes
+are rejected. A failed launch without any checkpoint needs a new output
+directory. Dry runs do not create output files or start training.
+
+D1 versus D0 diagnoses the two extra losses together. D2 versus D1 diagnoses
+the entire parameter-update policy, including classifier-row and box-head
+freezing, not just LoRA rank. Use matched epochs for initial screening and
+complete runs with multiple seeds before reporting a method improvement.
+
 ## 6. Primary three-module ablation
 
 The main ablation removes one macro module at a time while keeping the split,

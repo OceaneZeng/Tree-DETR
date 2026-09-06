@@ -1,0 +1,181 @@
+Edit and complete the attached unfinished architecture diagram into a scientifically accurate figure for graph-local continual adaptation of Deformable DETR. Use the attached image as the visual reference. Preserve the recognizable detector pipeline, example input image, pastel yellow detector blocks, pale-blue module outlines, pale-green objective region, colorful class nodes, tensor illustrations, query icons, dark outlines, and snowflake/flame convention.
+
+Preserve the 16:9 composition. Prefer a 3200 x 1800 rendering for readable equations; if exact original dimensions are required, use 1600 x 900 with the same arrangement. Modestly resize and reposition existing panels to use the empty lower canvas. Preserve visual identity, but prioritize correct connections and legible labels over fixed panel coordinates. Do not shrink a dense methods paragraph into the diagram.
+
+Show exactly three named proposed modules:
+1. Class-Interference GNN
+2. Neighbor-Scoped LoRA Adapter
+3. Graph-Conditioned Continual Objective
+
+The backbone, encoder, decoder, prediction heads, teacher, replay memory, and criterion are supporting components, not additional proposed modules. Keep the GNN in the lower-left area, the LoRA inset beside the decoder, and the objective in the lower-right area. Allocate enough width to the objective for three short horizontal computation lanes. Use the lower whitespace for the total loss and a compact legend.
+
+SCIENTIFIC SCOPE AND NOTATION
+
+Depict the implemented retention-aware configuration: a base replay quota for every old class, additional replay for selected high-risk classes, one shared LoRA parameter set per incremental stage, global teacher target completion, local margin, and off-neighborhood projection protection.
+
+Use t for the current incremental stage; K_(t-1) for old categories; U_t for all newly introduced categories; u in U_t for one illustrative new-class node; N_t for the stage-level selected old-class neighborhood. Replace the original mu symbols. Do not imply that an actual stage contains only one new category or that there is a separate adapter for each category.
+
+Represent two time scales using small subtitles inside the existing panels: the GNN is evaluated at stage setup, while the continual objective is evaluated during incremental training. The GNN is pretrained using completed-stage training data and is fixed during the current detector optimization. The neighborhood and protection basis are cached for the stage. Do not depict an online differentiable loop through Top-K or a detector-loss update to GNN weights.
+
+Use solid arrows for forward/data computation, dashed blue-gray arrows for stage-setup statistics and neighborhood control, and dashed red arrows for optimization gradients. A thin neutral leader line may indicate a magnified inset; it is not a feature arrow.
+
+TOP DETECTOR PIPELINE
+
+Preserve:
+Input Image (I) -> Backbone -> Feature Maps (F) -> Encoder -> Encoder Memory (M) -> Decoder.
+
+Keep Object Queries (Q) entering the Decoder from above. Label its outputs "Decoder Query Features (H)" rather than "Class-Agnostic Query Features"; the figure must not claim an unimplemented feature-disentanglement mechanism.
+
+Branch H into two compact heads positioned below the decoder:
+- Classification Head -> Class Logits Z_cls.
+- Box Regression Head -> Predicted Boxes B_box.
+
+Show the classification head with frozen old rows and trainable current-class rows. The box head remains frozen. Use a snowflake on the frozen decoder base and a small flame marker only at the adapted FFN locations. Make it clear that the decoder contains frozen original parameters and trainable low-rank additions.
+
+Connect student logits and boxes to the detection criterion in objective lane A. Connect matched logits to lane B. Supply labeled training targets to the appropriate criterion. Do not draw feature maps, encoder memory, or H entering the GNN directly.
+
+MODULE 1: CLASS-INTERFERENCE GNN
+
+Add the subtitle "Stage setup; fixed during detector training".
+
+Within the existing GNN region, draw a compact left-to-right sequence:
+
+Class-Conditioned Detection Losses {L_c}
+-> Target FFN Gradients {g_c}
+-> Pool + Normalize {x_c}
+-> Directed GNN
+-> Stage Risk Aggregation
+-> Top-K Old Classes N_t.
+
+The class-conditioned loss/statistics block must visibly receive detector predictions and class-conditioned labeled targets from current training data and old replay examples. Label this input route "Stage-start detector statistics". It represents a separate setup-time gradient evaluation at the pre-adaptation detector state, not fresh per-minibatch statistics during incremental optimization. Do not imply that the ordinary scalar DETR loss automatically outputs a strict additive decomposition by class.
+
+Show the compact gradient formula:
+g_c = vec(grad_{Theta_FFN} L_c).
+
+Add a dashed parameter-reference connection from the decoder's adapted FFN locations to this extraction block, labeled "Final two FFNs: base weights". Computing these reference gradients does not update the base weights.
+
+Show the compressed node feature formula:
+x_c = Normalize(Pool(g_c)).
+
+Preserve the vivid directed graph with old-class nodes c1, c2, c3 and a red/pink node "New class u in U_t". A small ellipsis may indicate additional new categories. Use thick red directed edges for high predicted interference and thin dark edges for low predicted interference. State the edge meaning with the short label "u -> c: old-class loss increase". These are directed risk scores p_(u->c), not calibrated probabilities.
+
+Above or below the graph, place one small unboxed calibration note: "Pretrained on historical LoRA-probe loss increases". Do not create a separate calibration panel or add a GNN training branch to the current detector loss.
+
+Between graph scores and Top-K, show:
+s_c = TopMean_{u in U_t}(p_(u->c)),
+N_t = TopK_{c in K_(t-1)} s_c.
+
+TopMean means averaging the largest few new-to-old scores for each old class. Use a tiny label "top-3 mean" if space permits. The Top-K output must contain old categories only. Keep the existing stacked-neighbor visualization.
+
+Branch the FULL gradient vectors g_c, before pooling, toward objective lane C. Send N_t by dashed control arrows to all three objective lanes. Never send x_c or N_t into the LoRA feature path.
+
+MODULE 2: NEIGHBOR-SCOPED LORA ADAPTER
+
+Keep this as a magnified inset attached by a neutral leader to the final two FFNs inside the Decoder. Remove the original external addition into the entire decoder: addition happens inside each adapted linear projection.
+
+Subtitle: "Final two decoder FFNs; linear1 + linear2".
+Small note: "Stage-shared; neighborhood-conditioned training".
+
+Illustrate one representative adapted linear projection. Split its input h into two parallel branches:
+- Frozen branch: W_(ell,j)^(t-1) h + b_(ell,j), with a blue snowflake.
+- Trainable branch: h -> A_(ell,j)^t -> B_(ell,j)^t -> scale alpha/r, with flames on A and B.
+
+Join the outputs using a circular plus INSIDE the inset, then output y. Show:
+y = W_(ell,j)^(t-1) h + b_(ell,j) + (alpha/r) B_(ell,j)^t A_(ell,j)^t h.
+
+Below it, show:
+Delta W_(ell,j)^t = (alpha/r) B_(ell,j)^t A_(ell,j)^t.
+
+Use ell in {L-1, L} for decoder layers and j in {1, 2} for the two FFN projections: FOUR adapted matrices with independent factors. The illustrated h denotes the input of each respective projection, not one shared tensor fed into both FFN linear layers simultaneously. The bias stays frozen.
+
+Inside the bottom of this same inset, add the small consolidation note:
+W_(ell,j)^t = W_(ell,j)^(t-1) + Delta W_(ell,j)^t.
+"Merge after training; remove temporary LoRA".
+
+Do not add a stage-transition panel, adapter bank, routing gate, separate old/current adapters, aggregate LoRA, beta merging, SVD merging, or per-class adapters.
+
+MODULE 3: GRAPH-CONDITIONED CONTINUAL OBJECTIVE
+
+Subtitle: "Incremental training only".
+Use three unboxed horizontal lanes separated by subtle rules. Each lane must show inputs, a short computation, and its loss output. Do not use three disconnected lists of loss names, or enclose every word in a nested box.
+
+LANE A: REPLAY, TARGET COMPLETION, DETECTION
+
+Historical Replay Memory + N_t
+-> Base Quota for All Old Classes + Extra Quota for N_t
+-> Replay Sampling with Current Data
+-> Mixed Training Batch.
+
+Use the compact quota annotation:
+q_c = b + e * 1[c in N_t], c in K_(t-1).
+
+Use small stacked sample tiles to distinguish current samples, base replay, and extra-risk replay. This is budget allocation and sampling, not a hard exclusion of non-neighbor classes. Hyperparameter values need not appear in the main figure.
+
+Send the same mixed images to the student detector and a compact Frozen Previous-Stage Teacher component inside this lane. The teacher produces old-class pseudo-labels for ALL old categories. Show a short filter label "Confidence + duplicate/GT overlap filtering".
+
+Merge the batch's labeled targets Y with the retained teacher pseudo-labels P_old into completed targets Y_tilde. Teacher completion applies to the mixed batch, including replay images. This is annotation completion for the same images, not a union of two image datasets. Keep this teacher path independent of N_t.
+
+Student predictions (Z_cls, B_box) + Y_tilde
+-> Hungarian Matching + DETR Criterion
+-> L_det.
+
+A compact note may identify classification, L1, and GIoU terms; avoid printing the full DETR loss expansion. Export matched query-label pairs to lane B.
+
+LANE B: LOCAL DISCRIMINATION
+
+N_t + U_t -> Local Category Set C_t = N_t union U_t.
+
+Matched student query-label pairs + C_t
+-> Select pairs with y in C_t
+-> True Logit z_(q,y) versus Strongest Local Competitor
+-> Margin Hinge
+-> L_local.
+
+Show one readable equation:
+L_local = Mean_{(q,y) in M_t} [m - z_(q,y) + max_{c in C_t, c != y} z_(q,c)]_+,
+where M_t contains only matched pairs with y in C_t.
+
+Use small contrasting logit bars if helpful, but do not invent numeric scores. Do not apply the margin to unmatched/background queries. An empty valid set yields zero; this can remain implicit rather than adding another block.
+
+LANE C: OFF-NEIGHBORHOOD PROTECTION
+
+Show two converging paths:
+
+K_(t-1) minus N_t + FULL target-FFN gradients {g_c}
+-> Normalize + Principal Gradient Basis
+-> U_off in R^(D x d_off).
+
+LoRA weight updates {Delta W_(ell,j)^t}
+-> Flatten + Concatenate
+-> delta_t in R^D.
+
+Merge them at "Project: U_off^T delta_t"
+-> Mean Squared Projection
+-> L_off.
+
+Show:
+L_off = ||U_off^T delta_t||_2^2 / d_off.
+
+The basis is constructed at stage setup and held fixed. It uses full parameter-coordinate gradients, NOT the pooled GNN features x_c. Its coordinates must match the ordered concatenation of all four dense LoRA updates. Distinguish protection-basis dimension d_off from adapter rank r. The zero-rank case has zero loss and need not occupy figure space.
+
+Use a tiny label "Fixed basis; first-order protection". Do not claim exact orthogonality enforcement, guaranteed zero forgetting, or that non-neighbor classes cannot be affected.
+
+TOTAL LOSS AND UPDATE PATH
+
+At the bottom of the green panel, merge the three loss outputs into one circular plus and show the central equation:
+L_total = L_det + lambda_local L_local + lambda_off L_off.
+
+Route a dashed red back-propagation arrow from L_total to the LoRA A/B factors and the current-category classifier rows. Label it "Update LoRA + new-class rows". No optimization arrow may terminate at the GNN, Top-K, teacher, basis construction, backbone, encoder, original decoder weights, old classifier rows, or frozen box head.
+
+The visual reading should be:
+- Stage setup: labeled detector statistics -> class gradients -> GNN risk neighborhood and fixed protection basis.
+- Training: neighborhood-guided replay + globally completed targets + local discrimination + off-neighborhood protection -> total loss -> LoRA and new-class row updates.
+- Inference: the original detector with merged weights, without the GNN, replay machinery, teacher, or a retained adapter bank.
+
+Do not add a fourth proposed module, Query-Norm Objectness Adapter, Entropy-Aware Unknown Mixing, or an unenabled distillation loss. The figure focuses on continual adaptation; do not invent a learned unknown-object head or claim improved unknown discovery.
+
+FINAL PRESENTATION CHECK
+
+Add a compact legend for frozen parameters, trainable parameters, solid forward arrows, dashed setup/control arrows, and dashed optimization arrows. Use consistent equation lettering and typeset subscripts/superscripts. Route long connectors along panel boundaries with explicit endpoints; avoid crossings through labels or formulas. Keep the input photo recognizable, all three module titles readable, and the LoRA feature path visibly inside the decoder FFN.
+
+Only the key equations above should be visible; the explanatory paragraphs are drawing instructions, not text to reproduce on the canvas. If space is tight, remove secondary prose and optional annotations before shrinking labels. The final result should be a clean, completed architecture figure, not a prose poster or a redesigned unrelated diagram.
