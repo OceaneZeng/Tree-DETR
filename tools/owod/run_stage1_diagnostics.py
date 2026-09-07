@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run matched D1/D2/D3 diagnostics using a completed pilot's exact training data.
+"""Run matched Stage 1 diagnostics using a completed pilot's exact training data.
 
 This launcher uses only the standard library. Training runs in the invoking
 Python environment. It never rebuilds the graph or replay annotation.
@@ -20,7 +20,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 PILOT = ROOT / "exps/owod/m-owodb/order0/pilot_unverified"
 ARM_NAMES = {"d1": "d1_lora_no_extra_losses", "d2": "d2_full_finetune_no_extra_losses",
-             "d3": "d3_lora_all_decoder_train_detection_heads"}
+             "d3": "d3_lora_all_decoder_train_detection_heads",
+             "d4": "d4_frozen_backbone_finetune"}
 
 
 def read_json(path):
@@ -63,9 +64,15 @@ def build_command(source_command, arm, output_dir, port, resume=False):
     options["--local-margin-coef"] = ["0"]
     options["--off-projection-coef"] = ["0"]
     options["--no-file-log"] = []
-    if arm == "d2":
+    if arm in ("d2", "d4"):
         options.pop("--neighbor-scoped-lora", None)
         options.pop("--trainable-class-ids", None)
+        if arm == "d4":
+            for key in ("--lora-rank", "--lora-last-decoder-layers", "--lora-train-detection-heads"):
+                options.pop(key, None)
+            # build_backbone sets requires_grad=False for all backbone weights
+            # when this is zero; all non-backbone modules keep normal training.
+            options["--lr_backbone"] = ["0"]
     elif arm == "d3":
         options["--lora-train-detection-heads"] = []
         options["--lora-last-decoder-layers"] = ["6"]
@@ -159,8 +166,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-run", type=Path, default=PILOT / "full_three_module_stage1_v1")
     parser.add_argument("--output-dir", type=Path, default=PILOT / "stage1_diagnostics_v1")
-    parser.add_argument("--experiment", choices=("d1", "d2", "d3", "both"), default="both",
-                        help="both keeps the original D1 then D2 schedule; D3 must be requested explicitly")
+    parser.add_argument("--experiment", choices=("d1", "d2", "d3", "d4", "both"), default="both",
+                        help="both keeps the original D1 then D2 schedule; D3/D4 must be requested explicitly")
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--master-port", type=int, default=29567)
     parser.add_argument("--dry-run", action="store_true")
@@ -213,6 +220,8 @@ def main(argv=None):
         print(f"\n{arm}: exact D0 annotation, graph selection, teacher and schedule")
         if arm == "d3":
             print("D3: LoRA in all six decoder FFNs plus full detection heads; backbone and other base parameters frozen")
+        if arm == "d4":
+            print("D4: no LoRA; freeze the entire backbone via lr_backbone=0; fine-tune encoder, decoder, projections and detection heads")
         print(shlex.join(command))
         plans.append((arm_root, output, plan, command))
     if args.dry_run:

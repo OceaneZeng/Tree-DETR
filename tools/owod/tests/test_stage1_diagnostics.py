@@ -90,6 +90,27 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(changed["--lora-last-decoder-layers"], ["6"])
         self.assertIn("--lora-train-detection-heads", changed)
 
+    def test_d4_matches_d2_except_backbone_freeze_and_unused_lora_options(self):
+        output = Path("d4/graph")
+        _, d2 = split_command(build_command(source_command(), "d2", output, 29567))
+        _, d4 = split_command(build_command(source_command(), "d4", output, 29567))
+        self.assertEqual(d4.pop("--lr_backbone"), ["0"])
+        for key in ("--lora-rank", "--lora-last-decoder-layers"):
+            d2.pop(key)
+        self.assertEqual(d2, d4)
+        self.assertFalse(any(key.startswith("--lora-") for key in d4))
+        self.assertNotIn("--neighbor-scoped-lora", d4)
+        self.assertNotIn("--trainable-class-ids", d4)
+
+    def test_d4_resume_keeps_stage0_teacher_and_backbone_freeze(self):
+        output = Path("d4/graph")
+        command = source_command() + ["--lr_backbone", "0.00002"]
+        _, changed = split_command(build_command(command, "d4", output, 29567, resume=True))
+        self.assertEqual(changed["--lr_backbone"], ["0"])
+        self.assertEqual(changed["--pretrained"], ["stage0.pth"])
+        self.assertEqual(changed["--resume"], [str(output / "checkpoint.pth")])
+        self.assertNotIn("--neighbor-scoped-lora", changed)
+
     def test_partial_metrics_and_resumed_duplicate_epochs(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "metrics.jsonl"
@@ -125,6 +146,21 @@ class DiagnosticTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertIn("d1: exact D0", captured.getvalue())
             self.assertIn("d2: exact D0", captured.getvalue())
+            self.assertNotIn("d3: exact D0", captured.getvalue())
+            self.assertNotIn("d4: exact D0", captured.getvalue())
+
+    def test_d4_dry_run_only_prepares_new_arm_without_creating_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.make_source(directory)
+            output = Path(directory) / "outputs"
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                code = main(["--source-run", str(source), "--output-dir", str(output),
+                             "--experiment", "d4", "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertFalse(output.exists())
+            self.assertIn("--lr_backbone 0", captured.getvalue())
+            self.assertNotIn("--neighbor-scoped-lora", captured.getvalue())
             self.assertNotIn("d3: exact D0", captured.getvalue())
 
     def test_d3_dry_run_does_not_create_outputs(self):

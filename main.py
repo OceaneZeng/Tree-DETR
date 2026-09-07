@@ -356,6 +356,16 @@ def main(args):
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of trainable params:', n_parameters)
+    if args.lr_backbone == 0 and not args.with_tree:
+        detector = model_without_ddp.detr if hasattr(model_without_ddp, 'detr') else model_without_ddp
+        backbone_trainable = sum(p.numel() for p in detector.backbone.parameters() if p.requires_grad)
+        if backbone_trainable:
+            raise ValueError('lr_backbone=0 must freeze every backbone parameter')
+        print('Frozen-backbone update policy:', json.dumps({
+            'backbone_trainable_parameters': backbone_trainable,
+            'non_backbone_trainable_parameters': n_parameters,
+            'lora_enabled': args.neighbor_scoped_lora,
+        }, sort_keys=True))
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)

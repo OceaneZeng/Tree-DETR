@@ -1,4 +1,4 @@
-# Stage 1 D1 / D2 / D3 实验操作
+# Stage 1 D1 / D2 / D3 / D4 实验操作
 
 ## 本轮目的
 
@@ -162,3 +162,56 @@ python tools/owod/run_stage1_diagnostics.py \
 ```bash
 python -m unittest tools.owod.tests.test_stage1_diagnostics models.graph_local.tests.test_lora_heads
 ```
+
+## D4：停止扩展 LoRA，采用冻结 backbone 的常规微调
+
+D3 第 5 轮结果为 Previous 50.988、Current 13.680、Known 32.334、H 31.604（%）。用户据此决定后续方法保留 GNN，舍弃 LoRA，backbone 全部冻结，其余检测器参数直接微调。D3 仅有已收到的第 5 轮结果，不标记为完整训练完成；保留其输出和权重。
+
+D4 相比 D2 仅将 `--lr_backbone` 设为 `0`，并清理无效的 LoRA 配置项。现有 `build_backbone` 在此设置下会将所有 backbone 参数的 `requires_grad` 设为 `False`；不仅是把该参数组学习率设成零。ResNet 使用 FrozenBatchNorm，统计量也保持固定。Encoder、Decoder（含 attention 和 FFN）、input projection、query embedding、分类头和定位头均按原常规微调路径训练，不添加 adapter、不施加分类行掩码。
+
+| 设置 | D2 | D4 |
+| --- | --- | --- |
+| Backbone | 默认训练 layer2/3/4，浅层冻结 | 全部冻结 |
+| 其余检测器可训练参数 | 常规微调 | 常规微调 |
+| LoRA | 无 | 无 |
+| GNN 邻域 / 训练标注 / 回放 / 教师 | 复用 D0 | 同左 |
+| 主学习率 / 分类头 weight decay | 1e-4 / 1e-4 | 同左 |
+| 训练计划 | 20 轮，第 15 轮后降学习率 | 同左 |
+| Margin / projection / distillation | 全部关闭 | 同左 |
+
+保留 D0/D1/D2/D3 作为历史结果；新方法中的第二部分可描述为 `Graph-Guided Detector Adaptation`，而非 LoRA Adapter。GNN 通过回放和训练监督影响适配，不在前向过程中路由参数，也没有在线参与检测器优化。常规微调本身不应表述为新的独立算法，方法贡献需围绕 GNN 及其对持续学习的作用验证。原 LoRA 参数投影项在 D4 中不适用。
+
+### 同步与启动 D4
+
+将本地 `exps/diagnostic_tools/stage1_d4_tools.zip` 传到服务器仓库根目录。包包含当前 `main.py`、诊断启动器、已有 LoRA 依赖、相关测试和本文。它只更新这些文件，不包含实验数据或权重。D3 若仍占用 GPU 0、1，应先等待其退出或单独结束 D3，再启动 D4；当前助手没有远程执行停止或启动操作。
+
+```bash
+cd ~/disks/new-hdd/zhy/Tree-DETR
+conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
+python -m zipfile -e stage1_d4_tools.zip .
+
+OUT="$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2"
+if python tools/owod/run_stage1_diagnostics.py \
+  --output-dir "$OUT" --experiment d4 --dry-run
+then
+  nohup setsid python -u tools/owod/run_stage1_diagnostics.py \
+    --output-dir "$OUT" --experiment d4 \
+    > stage1_d4_launcher.log 2>&1 < /dev/null &
+  echo "launcher PID: $!"
+fi
+```
+
+D4 从原 Stage 0 初始化，不从 D3 checkpoint 接着训练；输出为 v2 下的 `d4_frozen_backbone_finetune/graph/`，与所有历史组隔离。`--experiment both` 仍然只指 D1/D2，不会启动 D3/D4。
+
+```bash
+tail -n 40 stage1_d4_launcher.log
+python tools/owod/run_stage1_diagnostics.py \
+  --output-dir "$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2" \
+  --summarize
+```
+
+启动日志应显示 `Frozen-backbone update policy` 中的 `backbone_trainable_parameters: 0` 和 `lora_enabled: false`。当前模型本地实测非 backbone 可训练参数为 16,614,753，其中 Encoder 4,541,184，Decoder 6,123,264，input projection 5,639,168，query embedding 153,600，分类头 23,387，定位头 132,612，reference points 投影 514。参数审计确认不存在 LoRA，所有非 backbone 参数均可训练；一次优化器更新后，全部 backbone 权重保持逐元素相同。尚未在服务器执行 D4 训练。
+
+训练中断后，确认原进程已结束且 D4 存在自己的 checkpoint，再使用同一 D4 命令增加 `--resume`；日志重定向改为追加 `>>`。
+
+D4 第 5 轮先与 D2 的 48.096 / 49.038 / 48.567（Previous / Current / Known，%）比较。主判断是：仅冻结 backbone 后，能保留多少 D2 的新类学习能力和旧类表现。不能在 D4 尚无结果时声称其优于 D2。
