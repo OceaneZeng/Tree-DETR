@@ -1,4 +1,9 @@
-# DEUS-aligned OWOD research protocol
+# OWOD protocol and historical DEUS reference
+
+The current baseline scope is DETR-family OWOD methods. ORE, OrthogonalDet,
+and DEUS are excluded from the active comparison and reproduction queue.
+The DEUS discussion and transcribed table below remain historical protocol
+references, not the current baseline roster. See `official-owod-baselines.md`.
 
 ## Paper pipeline
 
@@ -39,18 +44,32 @@ bug corrected.
 
 These are external baselines with different architectures and training
 recipes. This repository does not rename one Deformable DETR implementation to
-simulate them. The local comparison consists of:
+simulate them. The main paper comparison must use those methods' real
+implementations, or explicitly attributed literature results under a matching
+benchmark protocol. Internal controls cannot substitute for external OWOD
+baselines. The first reproduction targets are PROB and OW-DETR. CAT, OWOBJ,
+and O1O require author-implementation and protocol checks before admission.
+EW-DETR's Deformable DETR variant is a separate candidate: its original
+exemplar-free class/domain-incremental EWOD scores are not M/S-OWODB scores.
+Verified author repositories and the reproduction sequence are recorded in
+`official-owod-baselines.md`.
+
+The following experiments belong in a separate internal control/ablation table:
 
 - Deformable DETR control.
 - GNN Top-K class-local replay (the proposed method).
 - matched Random-K replay.
 - Global old-class replay.
+- Historical cosine-neighborhood replay.
+- D1/D2 diagnostics of auxiliary objectives and the parameter-update policy.
 
-The primary method ablation is `Full`, `w/o Node Encoder`, `w/o Directed
-Message Passing`, and `w/o Pairwise Ranking Loss`. Each row removes exactly one
-GNN component while keeping the Deformable DETR checkpoint, replay quota,
-Top-K, seed, and schedule fixed. Random/global replay remain optional sanity
-controls; cosine similarity is not used as a component ablation.
+The three-module ablation compares the full method against removal of the GNN,
+LoRA, or graph-conditioned objective. Removing the node encoder, directed
+message passing, or pairwise ranking loss is a secondary GNN-internal ablation.
+Keep the detector checkpoint, replay budget/exposure, Top-K, seed, and schedule
+matched where the comparison permits. Explicitly state changed trainable
+parameters when removing LoRA. Cosine similarity is a neighborhood control,
+not a paper-method baseline or a component ablation.
 
 External method numbers must either be cited as Table 1 references or produced
 by the method's actual implementation on the validated annotations.

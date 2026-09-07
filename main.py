@@ -94,8 +94,10 @@ def get_args_parser():
                         help='train a temporary stage-level LoRA on the final decoder FFNs')
     parser.add_argument('--lora-rank', default=8, type=int)
     parser.add_argument('--lora-last-decoder-layers', default=2, type=int)
+    parser.add_argument('--lora-train-detection-heads', action='store_true',
+                        help='with LoRA, train full classification and box heads while keeping the feature extractor frozen')
     parser.add_argument('--trainable-class-ids', type=int, nargs='+', default=None,
-                        help='classifier rows trained together with the temporary LoRA')
+                        help='classifier rows trained with LoRA unless --lora-train-detection-heads opens all rows')
     parser.add_argument('--graph-local-class-ids', type=int, nargs='+', default=None,
                         help='current and GNN-neighbor classes used by the local margin')
     parser.add_argument('--local-margin-coef', default=0.0, type=float)
@@ -270,6 +272,8 @@ def main(args):
         raise ValueError('--neighbor-scoped-lora currently requires the Deformable DETR path')
     if args.neighbor_scoped_lora and not args.trainable_class_ids:
         raise ValueError('--neighbor-scoped-lora requires --trainable-class-ids')
+    if args.lora_train_detection_heads and not args.neighbor_scoped_lora:
+        raise ValueError('--lora-train-detection-heads requires --neighbor-scoped-lora')
     if args.local_margin_coef > 0 and not args.graph_local_class_ids:
         raise ValueError('--local-margin-coef requires --graph-local-class-ids')
     if args.off_projection_coef > 0 and not args.neighbor_scoped_lora:
@@ -324,14 +328,22 @@ def main(args):
             model_without_ddp, rank=args.lora_rank,
             last_n=args.lora_last_decoder_layers)
         classifier_hook_handles, _trainable = freeze_for_class_ids(
-            model_without_ddp, args.trainable_class_ids)
+            model_without_ddp, args.trainable_class_ids,
+            train_detection_heads=args.lora_train_detection_heads)
         print('Enabled neighbor-scoped stage LoRA:', json.dumps({
             'rank': args.lora_rank,
             'decoder_layers': args.lora_last_decoder_layers,
             'wrapped_linears': len(wrappers),
             'trainable_class_ids': sorted(set(args.trainable_class_ids)),
+            'classifier_update_scope': ('all_rows' if args.lora_train_detection_heads
+                                        else 'trainable_class_ids'),
+            'box_head_trainable': args.lora_train_detection_heads,
             'graph_local_class_ids': sorted(set(args.graph_local_class_ids or [])),
         }, sort_keys=True))
+        if args.lora_train_detection_heads:
+            print('D3 trainable parameters:', json.dumps([
+                name for name, parameter in model_without_ddp.named_parameters()
+                if parameter.requires_grad]))
 
     if args.off_neighborhood_basis:
         off_neighborhood_basis = load_local_checkpoint(args.off_neighborhood_basis)
@@ -420,8 +432,8 @@ def main(args):
             "params": [p for n, p in model_without_ddp.named_parameters()
                        if match_name_keywords(n, class_head_names) and p.requires_grad],
             "lr": args.lr * args.class_embed_lr_mult,
-            # Row masks freeze previous-class gradients. Disabling decay keeps
-            # those rows bitwise fixed even though the tensor is optimized.
+            # Zero decay protects masked rows. Keep the same classifier decay
+            # for the full-head LoRA diagnostic to isolate update scope.
             "weight_decay": 0.0 if args.neighbor_scoped_lora else args.weight_decay,
         }
     ]

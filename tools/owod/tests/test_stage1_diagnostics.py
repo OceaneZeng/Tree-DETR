@@ -18,6 +18,7 @@ def source_command():
             "--output_dir", "original/graph", "--epochs", "20", "--lr", "0.0001",
             "--seed", "42", "--teacher-completion", "--replay-sampling-fraction", "0.1",
             "--neighbor-scoped-lora", "--trainable-class-ids", "3", "6", "80",
+            "--lora-rank", "8", "--lora-last-decoder-layers", "2",
             "--off-neighborhood-basis", "basis.pt", "--off-projection-coef", "0.1",
             "--local-margin-coef", "0.5"]
 
@@ -71,6 +72,24 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(changed["--resume"], [str(Path("d1/graph/checkpoint.pth"))])
         self.assertEqual(changed["--pretrained"], ["stage0.pth"])
 
+    def test_d3_changes_only_lora_coverage_and_head_policy_relative_to_d1(self):
+        output = Path("d3/graph")
+        _, d1 = split_command(build_command(source_command(), "d1", output, 29567))
+        _, d3 = split_command(build_command(source_command(), "d3", output, 29567))
+        self.assertEqual(d3.pop("--lora-train-detection-heads"), [])
+        self.assertEqual(d3["--lora-last-decoder-layers"], ["6"])
+        d3["--lora-last-decoder-layers"] = ["2"]
+        self.assertEqual(d1, d3)
+
+    def test_d3_resume_keeps_six_layer_lora_and_stage0_teacher(self):
+        output = Path("d3/graph")
+        _, changed = split_command(build_command(
+            source_command(), "d3", output, 29567, resume=True))
+        self.assertEqual(changed["--pretrained"], ["stage0.pth"])
+        self.assertEqual(changed["--resume"], [str(output / "checkpoint.pth")])
+        self.assertEqual(changed["--lora-last-decoder-layers"], ["6"])
+        self.assertIn("--lora-train-detection-heads", changed)
+
     def test_partial_metrics_and_resumed_duplicate_epochs(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "metrics.jsonl"
@@ -106,6 +125,31 @@ class DiagnosticTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertIn("d1: exact D0", captured.getvalue())
             self.assertIn("d2: exact D0", captured.getvalue())
+            self.assertNotIn("d3: exact D0", captured.getvalue())
+
+    def test_d3_dry_run_does_not_create_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.make_source(directory)
+            output = Path(directory) / "outputs"
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                code = main(["--source-run", str(source), "--output-dir", str(output),
+                             "--experiment", "d3", "--dry-run"])
+            self.assertEqual(code, 0)
+            self.assertFalse(output.exists())
+            self.assertIn("--lora-train-detection-heads", captured.getvalue())
+            self.assertIn("--lora-last-decoder-layers 6", captured.getvalue())
+            self.assertNotIn("d1: exact D0", captured.getvalue())
+
+    def test_d3_rejects_non_six_layer_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.make_source(directory)
+            recorded_path = source / "graph/run_config.json"
+            recorded = json.loads(recorded_path.read_text())
+            recorded["dec_layers"] = 3
+            recorded_path.write_text(json.dumps(recorded))
+            with self.assertRaisesRegex(ValueError, "six-layer decoder"):
+                main(["--source-run", str(source), "--experiment", "d3", "--dry-run"])
 
     def test_nonempty_output_and_source_resume_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run matched D1/D2 diagnostics using a completed pilot's exact training data.
+"""Run matched D1/D2/D3 diagnostics using a completed pilot's exact training data.
 
 This launcher uses only the standard library. Training runs in the invoking
 Python environment. It never rebuilds the graph or replay annotation.
@@ -19,7 +19,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 PILOT = ROOT / "exps/owod/m-owodb/order0/pilot_unverified"
-ARM_NAMES = {"d1": "d1_lora_no_extra_losses", "d2": "d2_full_finetune_no_extra_losses"}
+ARM_NAMES = {"d1": "d1_lora_no_extra_losses", "d2": "d2_full_finetune_no_extra_losses",
+             "d3": "d3_lora_all_decoder_train_detection_heads"}
 
 
 def read_json(path):
@@ -65,6 +66,9 @@ def build_command(source_command, arm, output_dir, port, resume=False):
     if arm == "d2":
         options.pop("--neighbor-scoped-lora", None)
         options.pop("--trainable-class-ids", None)
+    elif arm == "d3":
+        options["--lora-train-detection-heads"] = []
+        options["--lora-last-decoder-layers"] = ["6"]
     elif arm != "d1":
         raise ValueError(f"Unknown diagnostic: {arm}")
     if resume:
@@ -85,7 +89,9 @@ def load_source(source):
         raise ValueError("Source must be a fresh Stage 1 LoRA pilot with teacher completion")
     if complete.get("last_epoch") != recorded["epochs"] - 1:
         raise ValueError("Source pilot has not completed its configured training schedule")
-    for key in ("--eval", "--skip-eval", "--old-class-distillation"):
+    if recorded.get("lora_train_detection_heads", False):
+        raise ValueError("Source must use the original new-class-only LoRA update policy")
+    for key in ("--eval", "--skip-eval", "--old-class-distillation", "--lora-train-detection-heads"):
         if key in options:
             raise ValueError(f"Unexpected source option: {key}")
     for option, field in (("--train-ann", "train_ann"), ("--val-ann", "val_ann"),
@@ -153,7 +159,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-run", type=Path, default=PILOT / "full_three_module_stage1_v1")
     parser.add_argument("--output-dir", type=Path, default=PILOT / "stage1_diagnostics_v1")
-    parser.add_argument("--experiment", choices=("d1", "d2", "both"), default="both")
+    parser.add_argument("--experiment", choices=("d1", "d2", "d3", "both"), default="both",
+                        help="both keeps the original D1 then D2 schedule; D3 must be requested explicitly")
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--master-port", type=int, default=29567)
     parser.add_argument("--dry-run", action="store_true")
@@ -165,6 +172,10 @@ def main(argv=None):
         summarize(source, destination)
         return 0
     config, options = load_source(source)
+    if args.experiment == "d3":
+        recorded = read_json(source / "graph/run_config.json")
+        if recorded.get("dec_layers", 6) != 6:
+            raise ValueError("D3 requires the source six-layer decoder")
     prefix, _ = split_command(config["command"])
     processes = int(prefix[prefix.index("--nproc_per_node") + 1]) if "--nproc_per_node" in prefix else 1
     if len(args.gpus.split(",")) != processes:
@@ -175,7 +186,7 @@ def main(argv=None):
     for path in inputs.values():
         if not path.is_file():
             raise ValueError(f"Missing source input: {path}")
-    arms = list(ARM_NAMES) if args.experiment == "both" else [args.experiment]
+    arms = ["d1", "d2"] if args.experiment == "both" else [args.experiment]
     # Hash once per invocation; both experiments use the identical source files.
     fingerprints = {key: {"path": str(path), "sha256": file_hash(path)}
                     for key, path in inputs.items()}
@@ -200,6 +211,8 @@ def main(argv=None):
         elif arm_root.exists() and any(arm_root.iterdir()):
             raise ValueError(f"Nonempty output without a diagnostic plan: {arm_root}")
         print(f"\n{arm}: exact D0 annotation, graph selection, teacher and schedule")
+        if arm == "d3":
+            print("D3: LoRA in all six decoder FFNs plus full detection heads; backbone and other base parameters frozen")
         print(shlex.join(command))
         plans.append((arm_root, output, plan, command))
     if args.dry_run:

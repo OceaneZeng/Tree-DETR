@@ -1,4 +1,4 @@
-# Stage 1 D1 / D2 实验操作
+# Stage 1 D1 / D2 / D3 实验操作
 
 ## 本轮目的
 
@@ -95,3 +95,70 @@ D0 第 5/10 轮新类 AP50 为 12.17%/13.64%，旧类为 50.23%/50.48%。
 - 两组都低：检查标注、伪标签与新类初始化，之后单独比较 lr 1e-4/2e-4。
 
 确认适配方案后，再开展同更新范围、同预算、同曝光下的 GNN/cosine/random 对照。历史 cosine 的 55.42% 新类 AP 仅作参考，不能代替这组受控实验。
+
+## 2026-09-07 更新：D3 扩大 LoRA 范围并开放检测头
+
+根据 D2 最终结果和当前研究约束，下一轮保留 GNN 和 LoRA，backbone 全冻结，不增加新的 adapter 结构。此前建议的 rank-16 或新 adapter 位置实验暂不执行。D3 是新的训练组，不是从已完成的 D1/D2 继续训练。
+
+| 设置 | D1 | D3 |
+| --- | --- | --- |
+| LoRA 位置 | Decoder 第 5、6 层 FFN 的 linear1/linear2 | Decoder 全部 6 层 FFN 的 linear1/linear2 |
+| LoRA rank | 8 | 8 |
+| 分类头 | 仅当前新类行 | 完整分类头可训练，包括旧类行 |
+| 定位头 | 冻结 | 可训练 |
+| Backbone / Encoder / 原 attention / 原 FFN | 冻结 | 冻结 |
+| Margin / projection | 0 / 0 | 0 / 0 |
+| 分类头 weight decay | 0 | 0，保持与 D1 一致 |
+
+D3 复用 D0 的原始训练标注、GNN 邻域、Stage 0 初始化及教师、回放曝光和 20 轮计划。不会因 LoRA 覆盖层数变化而重新计算 GNN 或保护基；这是为了固定选择策略，只测试适配范围。确定最终适配策略后，再研究与之对应的 GNN 校准。
+
+本地按当前 6 层、hidden_dim=256、91 槽位、共享检测头的真实模型核对：LoRA 可训练参数 122,880，分类头 23,387，定位头 132,612，总计 278,879。服务器日志以实际参数为准。启动时应看到 `decoder_layers: 6`、`wrapped_linears: 12`、`classifier_update_scope: all_rows`、`box_head_trainable: true`，以及完整可训练参数名列表；其中不应有 backbone、Encoder 或原 attention/FFN 权重。
+
+D3 同时扩大 LoRA 深度和开放检测头，是适配方案的整体实验。若改善，不能把全部提升归因于 LoRA 层数；若需要论文中的独立贡献，再分别拆分。GNN、回放与教师补标仍保留，当前组不验证 GNN 的独立收益。
+
+### 同步与启动
+
+本次不只修改了启动器。服务器需要同步 `main.py`、`models/graph_local/lora.py`、`tools/owod/run_stage1_diagnostics.py`。本地 `exps/diagnostic_tools/stage1_d3_tools.zip` 包含上述三份代码、本操作说明和两份测试文件。将包传到服务器仓库根目录后执行以下命令；解压会更新包内列出的同名文件。
+
+```bash
+cd ~/disks/new-hdd/zhy/Tree-DETR
+conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
+python -m zipfile -e stage1_d3_tools.zip .
+
+OUT="$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2"
+if python tools/owod/run_stage1_diagnostics.py \
+  --output-dir "$OUT" --experiment d3 --dry-run
+then
+  nohup setsid python -u tools/owod/run_stage1_diagnostics.py \
+    --output-dir "$OUT" --experiment d3 \
+    > stage1_d3_launcher.log 2>&1 < /dev/null &
+  echo "launcher PID: $!"
+fi
+```
+
+继续使用 v2 根目录，使汇总可以同时读取已有 D1/D2。D3 写入新的 `d3_lora_all_decoder_train_detection_heads/graph` 子目录，不覆盖 D1/D2。`--experiment both` 仍然只运行 D1/D2，不会自动启动 D3。默认 GPU 仍为 0、1，两卡每卡 batch 2。
+
+```bash
+tail -n 40 stage1_d3_launcher.log
+python tools/owod/run_stage1_diagnostics.py \
+  --output-dir "$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2" \
+  --summarize
+```
+
+中断后先确认原进程结束；只有 D3 已保存自己的 checkpoint 时，才以相同命令加 `--resume` 续跑，并将日志重定向改为 `>> stage1_d3_launcher.log`。
+
+第 20 轮参考结果（AP50 / H，单位 %）：
+
+| 组 | Previous | Current | Known | H |
+| --- | ---: | ---: | ---: | ---: |
+| D0 | 50.401 | 14.317 | 32.359 | 31.011 |
+| D1 | 50.438 | 14.152 | 32.295 | 30.920 |
+| D2 | 53.441 | 56.969 | 55.205 | 41.076 |
+
+先关注 D3 能否明显改善 D1 的新类 AP，以及距 D2 还有多少差距。第 5/10 轮仅作进度诊断，最终判断完成 20 轮后再做；本次 D2 在降学习率后的最后五轮仍有明显改善。
+
+本地验证命令：
+
+```bash
+python -m unittest tools.owod.tests.test_stage1_diagnostics models.graph_local.tests.test_lora_heads
+```

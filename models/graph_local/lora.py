@@ -213,7 +213,8 @@ def freeze_for_increment(model: nn.Module, old_num_classes: int) -> Tuple[List, 
     return handles, trainable
 
 
-def freeze_for_class_ids(model: nn.Module, trainable_class_ids: Iterable[int]
+def freeze_for_class_ids(model: nn.Module, trainable_class_ids: Iterable[int],
+                         train_detection_heads: bool = False
                          ) -> Tuple[List, List[nn.Parameter]]:
     """Freeze detector weights and expose only selected classifier rows.
 
@@ -221,7 +222,9 @@ def freeze_for_class_ids(model: nn.Module, trainable_class_ids: Iterable[int]
     increment cannot be represented by a contiguous ``old_num_classes``
     boundary.  This helper is the row-mask equivalent for arbitrary IDs.
     LoRA factors, when attached, remain trainable as the shared adaptation
-    path.
+    path. With train_detection_heads, both complete detection heads are
+    trainable instead of masking classifier rows; the feature extractor stays
+    frozen except for LoRA.
     """
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -231,6 +234,17 @@ def freeze_for_class_ids(model: nn.Module, trainable_class_ids: Iterable[int]
         module.lora_a.requires_grad_(True)
         module.lora_b.requires_grad_(True)
         trainable.extend([module.lora_a, module.lora_b])
+
+    if train_detection_heads:
+        detector = _detector(model)
+        seen_parameters = {id(parameter) for parameter in trainable}
+        for heads in (detector.class_embed, detector.bbox_embed):
+            for parameter in heads.parameters():
+                parameter.requires_grad_(True)
+                if id(parameter) not in seen_parameters:
+                    seen_parameters.add(id(parameter))
+                    trainable.append(parameter)
+        return [], trainable
 
     handles = []
     seen = set()

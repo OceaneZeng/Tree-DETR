@@ -45,7 +45,7 @@ GNN runner, and detector control accept `--allow-unverified-protocol`. This
 explicitly records `paper_comparable=false`; results from that mode must not be
 compared with published OWOD tables.
 
-## 2. External Table 1 baselines
+## 2. Historical Table 1 references and active baselines
 
 ORE, OW-DETR, CAT, PROB, OrthogonalDet, O1O, OWOBJ, and DEUS are external
 methods. They are not aliases for this repository's detector. The values
@@ -61,6 +61,17 @@ validated annotations. The paper marks the M-OWODB PROB and OrthogonalDet rows
 with a dagger because those two were rerun after correcting duplicated
 annotations. Values in `deus_table1.json` are literature references, not local
 measurements.
+
+The active comparison is restricted to DETR-family OWOD methods, prioritizing
+real PROB and OW-DETR reproductions. CAT, OWOBJ and O1O are candidates pending
+implementation and protocol verification. EW-DETR's Deformable DETR variant
+requires a separate protocol adaptation check. ORE, OrthogonalDet and DEUS
+are excluded from the active roster; their historical reference rows remain.
+Cosine, Random-K, Global Replay and D1/D2 belong to
+internal diagnostic or ablation tables, not the external baseline table. See
+[`official-owod-baselines.md`](../../docs/official-owod-baselines.md) for verified
+author repositories and the reproduction sequence. Existing local folders
+named `prob`, `ow_detr` or `ore_star` are not proof of reproducing these methods.
 
 ## 3. Deformable DETR control
 
