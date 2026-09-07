@@ -184,6 +184,10 @@ class DeformableDETR(nn.Module):
         if self.two_stage:
             enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
             out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
+        if getattr(self, 'return_baseline_features', False):
+            out['decoder_features'] = hs
+            out['attention_feature'] = features[1].tensors
+            out['padded_size'] = samples.tensors.shape[-2:]
         return out
 
     @torch.jit.unused

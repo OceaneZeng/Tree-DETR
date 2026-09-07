@@ -68,6 +68,12 @@ def get_args_parser():
     parser.add_argument('--two_stage', default=False, action='store_true')
     parser.add_argument('--with_tree', action='store_true',
                         help='Enable the experimental Tree-DETR EE-0 flat-tree losses and adapters')
+    parser.add_argument('--paper-baseline', choices=('ow-detr', 'ew-detr'), default=None)
+    parser.add_argument('--ow-pseudo-warmup', type=int, default=9)
+    parser.add_argument('--ow-top-unknown', type=int, default=5)
+    parser.add_argument('--ew-rank', type=int, default=16)
+    parser.add_argument('--ew-current-samples', type=int, default=0)
+    parser.add_argument('--ew-previous-samples', type=int, default=0)
 
     parser.add_argument('--owod-manifest', default='',
                         help='S-OWODB/M-OWODB split manifest used for this run')
@@ -221,11 +227,15 @@ def get_args_parser():
 
 
 def main(args):
+    if args.paper_baseline == 'ew-detr' and (args.ew_current_samples <= 0 or args.ew_previous_samples < 0):
+        raise ValueError('EW-DETR requires positive current and nonnegative previous sample counts')
     utils.init_distributed_mode(args)
     file_log_state = start_file_logging(args, utils.is_main_process())
     if utils.is_main_process() and args.output_dir:
         run_config = vars(args).copy()
-        run_config.update({'owod_detector_profile': detector_profile_dict()})
+        profile = ({'method': args.paper_baseline, 'implementation': 'controlled_adaptation',
+                    'paper_comparable': False} if args.paper_baseline else detector_profile_dict())
+        run_config.update({'owod_detector_profile': profile})
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         history_path = Path(args.output_dir) / 'run_history' / f'{run_id}.json'
@@ -233,7 +243,7 @@ def main(args):
         for config_path in (Path(args.output_dir) / 'run_config.json', history_path):
             with config_path.open('w', encoding='utf-8') as handle:
                 json.dump(run_config, handle, indent=2, sort_keys=True, default=str)
-        print('OWOD detector profile:', json.dumps(detector_profile_dict(), sort_keys=True))
+        print('OWOD detector profile:', json.dumps(profile, sort_keys=True))
     print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
@@ -252,7 +262,11 @@ def main(args):
     # currently the EE-0 flat-tree control, not an automatically induced tree.
     epoch_state = {'value': args.start_epoch}
     tree_head = None
-    if args.with_tree:
+    if args.paper_baseline:
+        from models.paper_baselines import build as build_paper_baseline
+        model, criterion, postprocessors = build_paper_baseline(args)
+        print('Controlled paper adaptation:', args.paper_baseline)
+    elif args.with_tree:
         from models.tree import build_tree
         model, criterion, postprocessors, tree_head = build_tree(
             args, epoch_getter=lambda: epoch_state['value'])
@@ -293,6 +307,15 @@ def main(args):
     if args.pretrained:
         checkpoint = load_local_checkpoint(args.pretrained)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        if args.paper_baseline:
+            source_args = checkpoint.get('args')
+            if getattr(source_args, 'paper_baseline', None) != args.paper_baseline:
+                raise ValueError('Baseline stage transitions must use their own checkpoint chain')
+            if getattr(source_args, 'owod_stage', -2) != args.owod_stage - 1:
+                raise ValueError('Baseline checkpoint is not from the immediately previous stage')
+            if args.paper_baseline == 'ew-detr' and not checkpoint.get('ew_consolidated'):
+                raise ValueError('EW stage transitions require a consolidated checkpoint')
+            model_without_ddp.load_state_dict(state_dict, strict=True)
         compatible, skipped = matching_state_dict(model_without_ddp, state_dict)
         if getattr(args, 'reset_classifier', False):
             classifier_keys = tuple(key for key in compatible
@@ -369,6 +392,12 @@ def main(args):
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
+    if args.paper_baseline:
+        allowed = set(args.owod_current_class_ids if args.paper_baseline == 'ew-detr'
+                      else args.owod_known_class_ids)
+        observed = {ann['category_id'] for ann in dataset_train.coco.anns.values()}
+        if not observed.issubset(allowed):
+            raise ValueError('Baseline training annotation contains disallowed class supervision')
 
     replay_indices = [
         index for index, image_id in enumerate(getattr(dataset_train, 'ids', []))
@@ -472,7 +501,15 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = load_local_checkpoint(args.resume)
-        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        if args.paper_baseline:
+            saved_args = checkpoint.get('args')
+            if (getattr(saved_args, 'paper_baseline', None) != args.paper_baseline
+                    or getattr(saved_args, 'owod_stage', None) != args.owod_stage
+                    or (checkpoint.get('ew_consolidated') and not args.eval)):
+                raise ValueError('Resume requires an unconsolidated checkpoint from this method/stage')
+            criterion.epoch = checkpoint['epoch']
+        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(
+            checkpoint['model'], strict=bool(args.paper_baseline))
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
             print('Missing Keys: {}'.format(missing_keys))
@@ -540,6 +577,8 @@ def main(args):
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         epoch_state['value'] = epoch
+        if args.paper_baseline:
+            criterion.epoch = epoch
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
@@ -610,6 +649,24 @@ def main(args):
                     for name in filenames:
                         torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                    output_dir / "eval" / name)
+
+    if args.paper_baseline == 'ew-detr':
+        beta = model_without_ddp.consolidate(args.ew_current_samples, args.ew_previous_samples)
+        # Every rank evaluates the same consolidated adapter used by the next task.
+        test_stats, _ = evaluate(
+            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir,
+            owod_known_class_ids=args.owod_known_class_ids,
+            owod_unknown_threshold=args.unknown_threshold,
+            owod_previous_class_ids=args.owod_previous_class_ids,
+            owod_current_class_ids=args.owod_current_class_ids,
+            print_freq=args.eval_print_freq)
+        utils.save_on_master({'model': model_without_ddp.state_dict(), 'args': args,
+                              'epoch': args.epochs - 1, 'ew_consolidated': True,
+                              'merge_beta': beta}, output_dir / 'checkpoint_consolidated.pth')
+        if utils.is_main_process():
+            with (output_dir / 'consolidated_metrics.json').open('w') as handle:
+                json.dump({'epoch': args.epochs - 1, 'merge_beta': beta,
+                           **{f'test_{key}': value for key, value in test_stats.items()}}, handle)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
