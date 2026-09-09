@@ -40,6 +40,40 @@ EW-DETR 的基础检测器参数和 aggregate adapters 冻结；task adapters、
 
 ## 3. Git 同步
 
+### 3.1 新服务器准备数据集
+
+仓库中的 `tools/download_data.sh` 只负责 COCO2017 和预训练权重，不负责 OWOD 四阶段标注。建议使用封装脚本完成 COCO 下载或旧服务器迁移，并在最后统一校验：
+
+```bash
+cd ~/disks/new-hdd/zhy/Tree-DETR
+conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
+
+# 方案 A：新服务器联网，下载完整 COCO2017（约 18 GB train + 1 GB val）
+bash tools/prepare_ew_dataset.sh --download-coco
+
+# 方案 B：已有旧服务器数据。把 HOST、USER 和 PROJECT 替换为实际值
+bash tools/prepare_ew_dataset.sh \
+  --sync-from <old-user>@<old-server>:<old-project>
+
+# 只检查已经准备好的数据，不做复制或下载
+bash tools/prepare_ew_dataset.sh --validate-only
+```
+
+脚本要求以下文件：
+
+```text
+data/coco/train2017/*.jpg
+data/coco/val2017/*.jpg
+data/coco/annotations/instances_train2017.json
+data/coco/annotations/instances_val2017.json
+data/coco-owod/m-owodb/order0/split_manifest_deus.invalid.json
+data/coco-owod/m-owodb/order0/stage_{0,1,2,3}/
+```
+
+每个 `stage_N` 必须有 `instances_increment_train2017.json`（或
+`instances_increment_only_train2017.json`）、`instances_train2017.json`、
+`instances_val2017.json` 和 `instances_val2017_full.json`。脚本会把迁移来的 manifest 路径改成本机路径，并保留 `.before_path_rewrite` 备份；不会修改标注内容或重新生成类别划分。当前 `split_manifest_deus.invalid.json` 是内部未验证 pilot，结果不能当作论文官方 OWOD 划分。
+
 在本地仓库提交并推送代码：
 
 ```powershell
