@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Queue controlled OW-DETR/EW-DETR four-stage runs after successful D4 completion."""
+"""Queue the EW-DETR four-stage baseline after successful D4 completion."""
 
 from __future__ import annotations
 
@@ -26,7 +26,22 @@ from tools.owod.run_stage1_diagnostics import training_environment, metric_rows
 
 PILOT = ROOT / 'exps/owod/m-owodb/order0/pilot_unverified'
 D4 = PILOT / 'stage1_diagnostics_v2/d4_frozen_backbone_finetune/graph'
-METHODS = ('ow-detr', 'ew-detr')
+ALL_METHODS = ('ow-detr', 'ew-detr')
+# EW-DETR is the current requested baseline. OW-DETR remains available only as
+# an explicit compatibility option for reproducing the historical joint queue.
+DEFAULT_METHODS = ('ew-detr',)
+METHODS = ALL_METHODS
+
+
+def selected_methods(args):
+    values = getattr(args, 'methods', DEFAULT_METHODS)
+    values = tuple(values)
+    if not values or len(set(values)) != len(values):
+        raise ValueError('Require at least one unique baseline method')
+    unknown = set(values) - set(ALL_METHODS)
+    if unknown:
+        raise ValueError(f'Unsupported baseline methods: {sorted(unknown)}')
+    return values
 
 
 def read_json(path):
@@ -220,6 +235,7 @@ def run_child(command, log_path, environment):
 
 
 def create_plan(args):
+    methods_to_run = selected_methods(args)
     source = read_json(args.d4_dir / 'run_config.json')
     expected = {'owod_stage': 1, 'lr_backbone': 0, 'epochs': 20,
                 'backbone': 'resnet50', 'enc_layers': 6, 'dec_layers': 6,
@@ -283,7 +299,7 @@ def create_plan(args):
         stage_records.append({'stage': stage, 'current_classes': current_classes,
                               'known_classes': known, 'increment_images': len(increment['images']),
                               'ow_replay_images': replay_count, 'ew_replay_images': 0})
-        for method in METHODS:
+        for method in methods_to_run:
             directory = args.output_dir / method / f'stage_{stage}'
             annotation = directory / 'train.json'
             payload = combined if method == 'ow-detr' else annotation_subset(
@@ -344,16 +360,16 @@ def create_plan(args):
             'ow_source': 'akshitac8/OW-DETR@3515ff8c36687a4f582ef6a2c83866966b56ce23',
             'ew_source': 'CVPR2026 paper + supplement; from-paper adaptation, unspecified choices documented',
             'memory_images': memory_budget, 'd4_memory_images': source_memory_count,
-            'gpus': args.gpus, 'stage_records': stage_records,
+            'gpus': args.gpus, 'methods': list(methods_to_run), 'stage_records': stage_records,
             'fingerprints': fingerprints, 'runs': {key: {k: v for k, v in value.items() if k != 'annotation'}
                                                    for key, value in methods.items()}}
     return plan, methods
 
 
-def summarize(output_dir):
+def summarize(output_dir, methods=DEFAULT_METHODS):
     print('AP50 / H in percent. EW pre-merge and consolidated results are separate.')
     print('method stage epoch weights previous current known U-Recall H status')
-    for method in METHODS:
+    for method in methods:
         for stage in range(4):
             directory = output_dir / method / f'stage_{stage}'
             status = 'complete' if baseline_complete(directory, 50 if stage == 0 else 20, method) else 'incomplete'
@@ -370,20 +386,23 @@ def summarize(output_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--d4-dir', type=Path, default=D4)
-    parser.add_argument('--output-dir', type=Path, default=PILOT / 'paper_baselines_v1')
+    parser.add_argument('--output-dir', type=Path, default=PILOT / 'paper_baselines_ew_v1')
     parser.add_argument('--gpus', default='0,1')
     parser.add_argument('--master-port', type=int, default=29579)
     parser.add_argument('--memory-images', type=int, default=None,
                         help='Default: exact number of tagged replay images in D4; optional override')
     parser.add_argument('--wait-hours', type=float, default=168)
     parser.add_argument('--poll-seconds', type=float, default=30)
+    parser.add_argument('--methods', nargs='+', choices=ALL_METHODS, default=list(DEFAULT_METHODS),
+                        help='Methods to run; default: ew-detr only. Use both names for the historical joint queue.')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--summarize', action='store_true')
     args = parser.parse_args(argv)
     args.d4_dir, args.output_dir = args.d4_dir.resolve(), args.output_dir.resolve()
+    args.methods = selected_methods(args)
     if args.summarize:
-        summarize(args.output_dir)
+        summarize(args.output_dir, args.methods)
         return 0
     if (args.memory_images is not None and args.memory_images < 80) or args.poll_seconds <= 0 or args.wait_hours <= 0:
         raise ValueError('Require overridden memory >=80 images and positive waiting intervals')
@@ -422,7 +441,7 @@ def main(argv=None):
             verify_checkpoint(args.d4_dir, 20, 'd4', 1, environment)
             run_child([sys.executable, str(ROOT / 'tools/owod/smoke_paper_baselines.py')],
                       args.output_dir / 'preflight.log', environment)
-            for method in METHODS:
+            for method in args.methods:
                 for stage in range(4):
                     key = f'{method}/stage_{stage}'
                     run = runs[key]
@@ -450,7 +469,7 @@ def main(argv=None):
             write_json(args.output_dir / 'queue_status.json', {'status': 'failed', 'error': str(error)})
             raise
         write_json(args.output_dir / 'queue_status.json', {'status': 'complete'})
-        summarize(args.output_dir)
+        summarize(args.output_dir, args.methods)
     return 0
 
 

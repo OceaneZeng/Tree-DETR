@@ -13,8 +13,9 @@ from models.deformable_detr import SetCriterion
 from models.matcher import HungarianMatcher
 from models.paper_baselines.detector import PaperCriterion, PaperPostProcess, attention_pseudo_queries
 from models.paper_baselines.ew_modules import DualLoRA, QueryNormEUMix, inject_dual_lora, merge_beta
-from tools.owod.run_paper_baselines import (annotation_subset, baseline_complete, combine_annotations,
-                                           create_plan, select_memory, wait_for_d4, payload_hash, write_json)
+from tools.owod.run_paper_baselines import (ALL_METHODS, annotation_subset, baseline_complete,
+                                           combine_annotations, create_plan, select_memory, selected_methods,
+                                           wait_for_d4, payload_hash, write_json)
 
 
 def criterion(method='ow-detr'):
@@ -177,6 +178,11 @@ def test_generated_annotation_hash_is_platform_independent(tmp_path):
     assert file_sha256(path) == payload_hash(value)
 
 
+def test_default_baseline_selection_is_ew_only():
+    assert selected_methods(SimpleNamespace()) == ('ew-detr',)
+    assert selected_methods(SimpleNamespace(methods=list(ALL_METHODS))) == ALL_METHODS
+
+
 @pytest.mark.parametrize('fail_stage', [None, 'ow-detr/stage_1'])
 def test_queue_executes_all_eight_stages_in_order_and_stops_on_failure(tmp_path, fail_stage):
     from tools.owod import run_paper_baselines as runner
@@ -212,11 +218,11 @@ def test_queue_executes_all_eight_stages_in_order_and_stops_on_failure(tmp_path,
          mock.patch.object(runner, 'run_child', side_effect=execute):
         if fail_stage:
             with pytest.raises(RuntimeError, match='fixture training failure'):
-                runner.main(['--output-dir', str(output)])
+                runner.main(['--output-dir', str(output), '--methods', 'ow-detr', 'ew-detr'])
             assert launched == ['ow-detr/stage_0', 'ow-detr/stage_1']
             assert json.loads((output / 'queue_status.json').read_text())['status'] == 'failed'
         else:
-            runner.main(['--output-dir', str(output)])
+            runner.main(['--output-dir', str(output), '--methods', 'ow-detr', 'ew-detr'])
             assert launched == list(runs)
             assert json.loads((output / 'queue_status.json').read_text())['status'] == 'complete'
         assert wait.call_count == 1
@@ -260,7 +266,7 @@ def test_four_stage_plan_parses_and_chains_own_weights(tmp_path):
     (d4 / 'run_config.json').write_text(json.dumps(source))
     (tmp_path / 'manifest.json').write_text(json.dumps({'stages': records}))
     args = SimpleNamespace(d4_dir=d4, output_dir=tmp_path / 'output', memory_images=398,
-                           gpus='0,1', master_port=29579)
+                           gpus='0,1', master_port=29579, methods=list(ALL_METHODS))
     plan, runs = create_plan(args)
     assert len(runs) == 8
     assert not args.output_dir.exists()
