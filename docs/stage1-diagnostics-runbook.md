@@ -1,5 +1,69 @@
 # Stage 1 D1 / D2 / D3 / D4 实验操作
 
+## 2026-09-10：后续采用 D2
+
+用户提供的第 20 轮结果：D2 Previous/Current/Known/H 为
+53.441/56.969/55.205/41.076，D4 为 52.890/52.776/52.833/41.736。
+D2 的 Known AP50 高 2.372 个百分点，D4 的 H 高 0.660；选择 D2
+作为已知类检测优先的工作配方，不能表述为所有指标都更好。
+
+当前决策取代此前 backbone 全冻结的限制：沿用 D2 的部分 backbone
+更新策略（ResNet layer2/3/4）、其余检测器常规微调，保留 GNN 回放和
+teacher completion，关闭 LoRA、margin、projection、distillation。
+不重新训练已完成的 D2 Stage 1；Stage 2 从其最终 checkpoint 开始，
+Stage 3 从这次 Stage 2 的最终 checkpoint 开始。GNN 使用原有校准权重，
+每阶段从当时的检测器重新提取训练集梯度并重新选择旧类邻域。
+
+新增 `tools/owod/run_d2_continuation.py` 从服务器 D2 和原 D0 pilot
+的记录读取参数、GNN 路径及回放配额，检查前一阶段完成后再启动。
+预检不提取梯度、不启动训练、不创建输出。同步代码后，确认 EW 队列
+和训练已停止、GPU 0/1 可用，再执行：
+
+```bash
+cd ~/disks/new-hdd/zhy/Tree-DETR
+if python tools/owod/run_d2_continuation.py --stage 2 --dry-run
+then
+  nohup python -u tools/owod/run_d2_continuation.py --stage 2 \
+    > d2_stage2_launcher.log 2>&1 < /dev/null &
+  echo "launcher PID: $!"
+fi
+```
+
+```bash
+tail -n 60 d2_stage2_launcher.log
+python tools/owod/run_d2_continuation.py --summarize
+```
+
+Stage 2 完成并检查结果后，同样启动 Stage 3：
+
+```bash
+if python tools/owod/run_d2_continuation.py --stage 3 --dry-run
+then
+  nohup python -u tools/owod/run_d2_continuation.py --stage 3 \
+    > d2_stage3_launcher.log 2>&1 < /dev/null &
+  echo "launcher PID: $!"
+fi
+```
+
+输出为 `exps/owod/m-owodb/order0/pilot_unverified/d2_continual_v1/stage_2/graph`
+和 `stage_3/graph`，训练日志为 `train.log`，指标为 `metrics.jsonl`。
+中断后使用对应命令加 `--resume`，必须有当前阶段 checkpoint、原始图和标注；
+已完成的阶段不会重跑。不要同时重复启动同一个阶段。
+
+保持原有每类配额 10、风险类额外 40、K=5 时，名义图像配额总和为
+Stage 1/2/3 的 400/600/800，去重后实际图像数可能更少。
+这不是固定总 memory 的实验。现有 runner 从 manifest 的前一阶段
+train 文件选择回放并计算旧类梯度，并非严格只访问上一阶段实际保留
+的有限 memory。继续这条链用于内部验证；论文比较前必须统一并审计
+候选池、存储预算和训练时可访问的旧图像，不能直接与在线固定 398 张
+memory 的 OW-DETR 适配结果作公平性结论。
+
+实验顺序：先完成 D2 的 Stage 2/3；再在共同 Stage 0 初始化、同一
+训练预算下做 Stage 1 的 GNN/随机/均匀分配对照与 teacher 去除对照；
+严格匹配总回放数量及采样比例，不同时改学习率或增加损失。最终候选
+至少补 3 个种子，报告平均值和波动。已完成的 OW-DETR 使用 D4 冻结
+设置，保留为旧设置结果；它不能直接证明采用 D2 更新策略的方法更优。
+
 ## 本轮目的
 
 先测试附加损失和参数更新范围。D1 保留 rank-8 末两层 LoRA，把 local margin 和 off projection 系数设为零。D2 同样关闭两个损失，使用常规检测器微调。D2 也会开放旧分类器行和 box head，不是只改变矩阵秩。

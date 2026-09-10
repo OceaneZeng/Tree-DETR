@@ -207,6 +207,49 @@ cat exps/owod/m-owodb/order0/pilot_unverified/paper_baselines_ew_v1/queue_status
 
 比较时记录每个阶段、每个 epoch 和两种权重状态的 Previous AP50、Current AP50、Known AP50、U-Recall、H。Stage 3 已没有未知类 ground truth，未知类指标和 H 不再具有与 Stage 1/2 相同的开放世界含义。
 
+### 9.1 当前服务器上的历史 OW-DETR 记录
+
+以下结果来自服务器在 2026-09-09 执行的
+`python tools/owod/run_paper_baselines.py --summarize`。它们的 `method=ow-detr`，
+属于此前的 OW-DETR 队列，不是当前只训练的 EW-DETR baseline；保留这些数据是为了追踪已有实验，
+不能将其作为 EW-DETR 的结果引用。
+
+脚本输出单位为百分比（AP50、U-Recall 和 H）：
+
+```text
+method  stage  epoch  weights  previous  current  known   U-Recall  H       status
+ow-detr 0      5      task     NA        20.650   20.650  0.000     0.000   complete
+ow-detr 0      10     task     NA        24.958   24.958  0.187     0.371   complete
+ow-detr 0      15     task     NA        29.644   29.644  0.370     0.731   complete
+ow-detr 0      20     task     NA        31.002   31.002  0.194     0.385   complete
+ow-detr 0      25     task     NA        32.610   32.610  1.003     1.946   complete
+ow-detr 0      30     task     NA        35.042   35.042  0.588     1.157   complete
+ow-detr 0      35     task     NA        37.910   37.910  0.688     1.352   complete
+ow-detr 0      40     task     NA        38.784   38.784  0.771     1.513   complete
+ow-detr 0      45     task     NA        42.150   42.150  1.090     2.124   complete
+ow-detr 0      50     task     NA        42.488   42.488  1.052     2.052   complete
+ow-detr 1      5      task     21.380    43.596   32.488  0.000     0.000   complete
+ow-detr 1      10     task     16.394    45.372   30.883  0.363     0.717   complete
+ow-detr 1      15     task     15.019    47.114   31.067  0.767     1.497   complete
+ow-detr 1      20     task     16.188    51.713   33.951  0.716     1.403   complete
+ow-detr 2      5      task     25.834    33.307   28.325  0.000     0.000   incomplete
+```
+
+当前阶段状态：Stage 0 已完成至 epoch 50，Stage 1 已完成至 epoch 20，Stage 2 仅有 epoch 5 且为
+`incomplete`，Stage 3 尚无记录。该队列的最终行可简写为：
+
+```text
+OW-DETR Stage 0: epoch=50, previous=NA, current=42.488, known=42.488, U-Recall=1.052, H=2.052, complete
+OW-DETR Stage 1: epoch=20, previous=16.188, current=51.713, known=33.951, U-Recall=0.716, H=1.403, complete
+OW-DETR Stage 2: epoch=5, previous=25.834, current=33.307, known=28.325, U-Recall=0.000, H=0.000, incomplete
+```
+
+如需在服务器保存同一份可追溯文本记录：
+
+```bash
+python tools/owod/run_paper_baselines.py --summarize | tee ow_detr_summary_2026-09-09.txt
+```
+
 ## 10. 推荐执行顺序
 
 下面是一套从服务器检查到正式训练的完整命令。每条命令前的注释说明它的作用。
