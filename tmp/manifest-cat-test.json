@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "paper_comparable": false,
+  "protocol": "official_external_recipe; not Tree-DETR COCO matched",
+  "records": [
+    {
+      "method": "cat",
+      "status": "source_found_config_pending",
+      "repo": "tmp\\PROB",
+      "commit": "b1d7fe68f5d55ffe8bc996ab15d7a260fee1e30a",
+      "path": "tmp\\PROB",
+      "entry": null,
+      "config": null,
+      "dataset": null,
+      "missing": [],
+      "note": "CVPR 2023 CAT source URL currently unavailable (HTTP 404)",
+      "source": "cloned"
+    }
+  ],
+  "commands": {
+    "cat": null
+  },
+  "stage_commands": {
+    "cat": []
+  },
+  "cat_source": "https://github.com/xiaomabufei/CAT (currently unavailable)",
+  "limitations": [
+    "PROB and OWOBJ use their own repositories, data views and evaluators.",
+    "Their official recipes are not exact runs on Tree-DETR's internal unverified manifest.",
+    "CAT is not runnable until a verified source checkout is supplied."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "paper_comparable": true,
+  "protocol": "shared_m-owodb_v1; external author evaluator",
+  "records": [
+    {
+      "method": "prob",
+      "status": "ready",
+      "repo": "https://github.com/orrzohar/PROB.git",
+      "commit": "b1d7fe68f5d55ffe8bc996ab15d7a260fee1e30a",
+      "path": "tmp\\PROB",
+      "entry": "main_open_world.py",
+      "config": "configs/M_OWOD_BENCHMARK.sh",
+      "dataset": "TOWOD",
+      "missing": [],
+      "note": "official PROB repository; M-OWODB recipe",
+      "source": "local"
+    },
+    {
+      "method": "owobj",
+      "status": "ready",
+      "repo": "https://github.com/AI4Math-ShanZhang/OWOBJ.git",
+      "commit": "f5c583e39593168e2313c149ba69801d79619f42",
+      "path": "tmp\\OWOBJ",
+      "entry": "main_open_world.py",
+      "config": "configs/M_OWOD_BENCHMARK.sh",
+      "dataset": "OWDETR",
+      "missing": [],
+      "note": "official OWOBJ repository; M-OWODB recipe",
+      "source": "local"
+    },
+    {
+      "method": "cat",
+      "status": "pending_source",
+      "note": "CVPR 2023 CAT source URL currently unavailable (HTTP 404)"
+    }
+  ],
+  "commands": {
+    "prob": "cd tmp\\PROB && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+    "owobj": "cd tmp\\OWOBJ && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+    "cat": null
+  },
+  "stage_commands": {
+    "prob": {
+      "train": "cd tmp\\PROB && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+      "evaluate": "cd tmp\\PROB && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD"
+    },
+    "owobj": {
+      "train": "cd tmp\\OWOBJ && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+      "evaluate": "cd tmp\\OWOBJ && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD"
+    },
+    "cat": []
+  },
+  "cat_source": "https://github.com/xiaomabufei/CAT (currently unavailable)",
+  "limitations": [
+    "PROB and OWOBJ retain their own repositories and evaluators; only the data view and 20/20/20/20 protocol are shared.",
+    "The shared flag is a metadata claim and requires the converter plus OWOBJ adapter patch to have been applied.",
+    "CAT is not runnable until a verified source checkout is supplied."
+  ]
+}

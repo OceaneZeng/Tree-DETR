@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "paper_comparable": false,
+  "protocol": "official_external_recipe; not Tree-DETR COCO matched",
+  "records": [
+    {
+      "method": "prob",
+      "status": "ready",
+      "repo": "https://github.com/orrzohar/PROB.git",
+      "commit": "b1d7fe68f5d55ffe8bc996ab15d7a260fee1e30a",
+      "path": "tmp\\prob",
+      "entry": "main_open_world.py",
+      "config": "configs/M_OWOD_BENCHMARK.sh",
+      "dataset": "TOWOD",
+      "missing": [],
+      "note": "official PROB repository; M-OWODB recipe",
+      "source": "local"
+    },
+    {
+      "method": "owobj",
+      "status": "ready",
+      "repo": "https://github.com/AI4Math-ShanZhang/OWOBJ.git",
+      "commit": "f5c583e39593168e2313c149ba69801d79619f42",
+      "path": "tmp\\owobj",
+      "entry": "main_open_world.py",
+      "config": "configs/M_OWOD_BENCHMARK.sh",
+      "dataset": "OWDETR",
+      "missing": [],
+      "note": "official OWOBJ repository; M-OWODB recipe",
+      "source": "local"
+    }
+  ],
+  "commands": {
+    "prob": "cd tmp\\prob && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+    "owobj": "cd tmp\\owobj && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD"
+  },
+  "stage_commands": {
+    "prob": {
+      "train": "cd tmp\\prob && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+      "evaluate": "cd tmp\\prob && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD"
+    },
+    "owobj": {
+      "train": "cd tmp\\owobj && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD",
+      "evaluate": "cd tmp\\owobj && CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK.sh --dataset TOWOD --data_root ./data/OWOD"
+    }
+  },
+  "cat_source": "https://github.com/xiaomabufei/CAT (currently unavailable)",
+  "limitations": [
+    "PROB and OWOBJ use their own repositories, data views and evaluators.",
+    "Their official recipes are not exact runs on Tree-DETR's internal unverified manifest.",
+    "CAT is not runnable until a verified source checkout is supplied."
+  ]
+}
