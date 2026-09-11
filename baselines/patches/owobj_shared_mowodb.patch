@@ -1,7 +1,20 @@
 diff --git a/datasets/torchvision_datasets/open_world.py b/datasets/torchvision_datasets/open_world.py
 --- a/datasets/torchvision_datasets/open_world.py
 +++ b/datasets/torchvision_datasets/open_world.py
-@@ -145,16 +145,9 @@ class OWDetection(VisionDataset):
+@@ -9,12 +9,10 @@ import logging
+ import copy
+ from torchvision.datasets import VisionDataset
+ import itertools
+-from io import BytesIO
+ import numpy as np
+ import xml.etree.ElementTree as ET
+ from PIL import Image
+ from torchvision.datasets.utils import download_url, check_integrity, verify_str_arg
+-from pycocotools.coco import COCO
+ #OWOD splits
+ VOC_CLASS_NAMES_COCOFIED = [
+     "airplane",  "dining table", "motorcycle",
+@@ -145,16 +143,9 @@ class OWDetection(VisionDataset):
          annotation_dir = os.path.join(self.root, 'Annotations')
          image_dir = os.path.join(self.root, 'JPEGImages')
  

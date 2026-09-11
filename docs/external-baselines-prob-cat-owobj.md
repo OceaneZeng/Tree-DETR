@@ -1,50 +1,44 @@
 # PROB, CAT and OWOBJ reproduction status
 
-The repository now provides `tools/owod/prepare_external_baselines.py` to
-create pinned, independently auditable checkouts and a command manifest. It
-does not rename the local detector as an external method.
+External implementations live only under `baselines/`; shared data lives under
+`data/`; every checkpoint, metric, manifest, and log lives under the root-level
+`exps/`. See `project-layout.md` for the ownership rules.
 
-PROB (`orrzohar/PROB`) and OWOBJ (`AI4Math-ShanZhang/OWOBJ`) each ship their
-own Deformable-DETR fork, VOC-style OWOD data view, training schedule, replay
-files and evaluator. Their official M-OWODB recipes therefore cannot be
-called a same-setting run on Tree-DETR's internal COCO manifest. A controlled
-COCO transfer would require a separate port of the model, data loader and
-evaluator, and its numbers would be marked `paper_comparable=false`.
+The pinned repositories are PROB (`orrzohar/PROB`) and OWOBJ
+(`AI4Math-ShanZhang/OWOBJ`). CAT's published repository URL currently returns
+404, so CAT remains `pending_source` instead of being approximated locally.
 
-CAT is the CVPR 2023 paper *CAT: LoCalization and IdentificAtion Cascade
-Detection Transformer for Open-World Object Detection*. The paper's listed
-URL, `https://github.com/xiaomabufei/CAT`, currently returns 404. No CAT
-training command is emitted until a verified author checkout or archive is
-available.
-
-Prepare the available official repositories on the server:
+Initialize sources and prepare the common official M-OWODB data view:
 
 ```bash
-cd ~/disks/new-hdd/zhy/Tree-DETR
-conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
+git submodule update --init --recursive
+
+python tools/owod/prepare_shared_mowodb.py \
+  --manifest "$PWD/data/coco-owod/m-owodb/split_manifest.json" \
+  --train-coco "$PWD/data/coco/annotations/instances_train2017.json" \
+  --val-coco "$PWD/data/coco/annotations/instances_val2017.json" \
+  --image-root "$PWD/data/coco/train2017" \
+  --image-root "$PWD/data/coco/val2017" \
+  --image-mode symlink \
+  --output "$PWD/data/derived/m-owodb-voc" \
+  --baseline-root "$PWD/baselines" \
+  --clean
+```
+
+Apply `baselines/patches/owobj_shared_mowodb.patch` to the pinned OWOBJ checkout.
+It removes author-machine data paths without changing the model or losses.
+
+Generate an auditable command manifest:
+
+```bash
 python tools/owod/prepare_external_baselines.py \
   --methods prob owobj cat \
-  --repo-root "$PWD/exps/external_baselines/repos" \
-  --gpus 0,1
+  --source-root "$PWD/baselines" \
+  --shared-mowodb \
+  --gpus 0,1 \
+  --output "$PWD/exps/owod/m-owodb/order0/official/baselines/run_manifest.json"
 ```
 
-Inspect the generated `exps/external_baselines/external_baseline_manifest.json`.
-It records each commit and the exact official config. Run an official recipe
-only after installing that repository's documented environment and placing
-its required VOC/TOWOD data under that repository:
-
-```bash
-python - <<'PY'
-import json
-from pathlib import Path
-p = Path('exps/external_baselines/external_baseline_manifest.json')
-d = json.loads(p.read_text())
-for method, command in d['commands'].items():
-    print(f'{method}: {command or "BLOCKED: source/config unavailable"}')
-PY
-```
-
-The scripts use the authors' epoch counts and replay rules. Do not pass the
-Tree-DETR D2/D4 checkpoint to them: the repositories expect their own DINO
-ResNet-50 initialization and checkpoint format. Report these as official
-recipe runs separately from Tree-DETR's internal controlled baselines.
+The shared scripts require `MOWODB_DATA_ROOT` and `MOWODB_OUTPUT_ROOT`. This
+ensures the external source directories remain source-only and all durable run
+artifacts are written beneath the project's canonical `exps/` tree.

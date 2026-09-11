@@ -312,6 +312,8 @@ nohup setsid python -u tools/owod/run_d2_followups.py --experiments long --resum
 | [run_d2_followups.py](tools/owod/run_d2_followups.py) | 当前 D2-long / Random-K 实验 |
 | [run_paper_baselines.py](tools/owod/run_paper_baselines.py) | 历史 D4 配置的 OW-DETR / EW-DETR 队列 |
 | [models/owod_metrics.py](models/owod_metrics.py) | 当前内部 OWOD 指标 |
+| [baselines](baselines) | 固定版本的外部复现源码（不存放结果） |
+| [project-layout.md](docs/project-layout.md) | 数据、源码和实验输出的目录边界 |
 | [stage1-diagnostics-runbook.md](docs/stage1-diagnostics-runbook.md) | D0–D4 设置演变与操作记录 |
 | [paper-baselines.md](docs/paper-baselines.md) | 外部方法适配来源、设置及限制 |
 

@@ -20,14 +20,13 @@ PROB/OWOBJ 的官方代码仍保留为独立 checkout；这里只增加数据适
 cd /path/to/Tree-DETR
 python tools/owod/prepare_external_baselines.py \
   --methods prob owobj cat \
-  --source-root tmp \
-  --repo-root exps/external_baselines/repos \
+  --source-root baselines \
   --gpus 0,1 \
-  --output exps/external_baselines/external_baseline_manifest.json
+  --output exps/owod/m-owodb/order0/official/baselines/run_manifest.json
 ```
 
-如果服务器没有 `tmp/PROB` 和 `tmp/OWOBJ`，去掉 `--source-root tmp`，脚本会从
-官方 GitHub 浅克隆到 `exps/external_baselines/repos/`。
+外部源码统一位于 `baselines/`。克隆主项目后先执行
+`git submodule update --init --recursive`，不要在 `data/` 或 `exps/` 复制源码。
 
 ## 1. 注册官方 M-OWODB 数据
 
@@ -55,15 +54,14 @@ python tools/owod/prepare_shared_mowodb.py \
   --image-root "$PWD/data/coco/train2017" \
   --image-root "$PWD/data/coco/val2017" \
   --image-mode symlink \
-  --output "$PWD/tmp/PROB/data/OWOD" \
-  --output "$PWD/tmp/OWOBJ/data/OWOD" \
+  --output "$PWD/data/derived/m-owodb-voc" \
+  --baseline-root "$PWD/baselines" \
   --clean
 ```
 
 Windows 没有创建 symlink 的权限时，把 `--image-mode symlink` 改成
-`--image-mode copy`。如果两个 checkout 已经共享 `JPEGImages`，可以省略
-`--image-root/--image-mode`，但必须确认两个目录中的每个 split 名字都能找到对应
-的 `.jpg` 文件。
+`--image-mode copy`。转换结果只生成一份，PROB 和 OWOBJ 都通过
+`MOWODB_DATA_ROOT` 读取该目录。
 
 ## 2. 环境和数据
 
@@ -75,14 +73,14 @@ conda create -n prob python=3.10.4 -y
 conda create -n owobj python=3.10.4 -y
 
 conda activate prob
-cd /path/to/Tree-DETR/tmp/PROB
+cd /path/to/Tree-DETR/baselines/prob
 pip install -r requirements.txt
 pip install torch==1.12.0+cu113 torchvision==0.13.0+cu113 torchaudio==0.12.0 \
   --extra-index-url https://download.pytorch.org/whl/cu113
 cd models/ops && sh make.sh
 
 conda activate owobj
-cd /path/to/Tree-DETR/tmp/OWOBJ
+cd /path/to/Tree-DETR/baselines/owobj
 pip install -r requirements.txt
 pip install torch==1.12.0+cu113 torchvision==0.13.0+cu113 torchaudio==0.12.0 \
   --extra-index-url https://download.pytorch.org/whl/cu113
@@ -90,7 +88,7 @@ cd models/ops && sh make.sh
 ```
 
 两个仓库都需要 DINO ResNet-50 权重 `dino_resnet50_pretrain.pth` 放到各自
-`models/`。上一步生成的 `data/OWOD/` 包含 `Annotations/`、`ImageSets/TOWOD/`
+`models/`。上一步生成的 `data/derived/m-owodb-voc/` 包含 `Annotations/`、`ImageSets/TOWOD/`
 和 `ImageSets/OWDETR/`；两套目录写入相同 split，只是同时保留了 `owod_t1_*` 和
 `t1_*` 两种作者命名。
 
@@ -99,8 +97,8 @@ OWOBJ 原始 commit 把 split、COCO JSON 和 HDF5 图像硬编码到作者服�
 数据适配补丁（只替换数据后端，模型和损失不变）：
 
 ```bash
-cd /path/to/Tree-DETR/tmp/OWOBJ
-git apply /path/to/Tree-DETR/tools/owod/patches/owobj_shared_mowodb.patch
+cd /path/to/Tree-DETR/baselines/owobj
+git apply /path/to/Tree-DETR/baselines/patches/owobj_shared_mowodb.patch
 ```
 
 补丁应用后应检查 `git diff --check`，并记录补丁文件的 SHA-256；重新 checkout
@@ -116,39 +114,49 @@ Task 1 到 Task 4，并包含 replay/fine-tuning 阶段。
 cd /path/to/Tree-DETR
 python tools/owod/prepare_external_baselines.py \
   --methods prob owobj cat \
-  --source-root tmp \
+  --source-root baselines \
   --shared-mowodb \
   --gpus 0,1 \
-  --output exps/external_baselines/external_baseline_manifest.json
+  --output exps/owod/m-owodb/order0/official/baselines/run_manifest.json
 
 # PROB：配置内部依次运行 t1、t2、t2_ft、t3、t3_ft、t4、t4_ft
 tmux new -s mowodb-prob
 conda activate prob
-cd /path/to/Tree-DETR/tmp/PROB
-mkdir -p exps/MOWODB
+PROJECT_ROOT=/home/top/disks/new-hdd/zhy/Tree-DETR
+export MOWODB_DATA_ROOT="$PROJECT_ROOT/data/derived/m-owodb-voc"
+export MOWODB_OUTPUT_ROOT="$PROJECT_ROOT/exps/owod/m-owodb/order0/official/baselines"
+mkdir -p "$MOWODB_OUTPUT_ROOT/prob/logs"
+cd "$PROJECT_ROOT/baselines/prob"
 set -o pipefail
 CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 \
-  ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK_SHARED.sh 2>&1 | tee exps/MOWODB/prob_train.log
+  ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK_SHARED.sh \
+  2>&1 | tee "$MOWODB_OUTPUT_ROOT/prob/logs/train.log"
 # 按 Ctrl-b d 脱离，不要按 Ctrl-c
 
 # 训练结束后重新连接同一个 session 执行评估
 tmux attach -t mowodb-prob
 CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 \
-  ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK_SHARED.sh 2>&1 | tee exps/MOWODB/prob_eval.log
+  ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK_SHARED.sh \
+  2>&1 | tee "$MOWODB_OUTPUT_ROOT/prob/logs/eval.log"
 
 # OWOBJ：先应用上面的 shared adapter，再运行同样的四阶段 recipe
 tmux new -s mowodb-owobj
 conda activate owobj
-cd /path/to/Tree-DETR/tmp/OWOBJ
-mkdir -p exps/MOWODB
+PROJECT_ROOT=/home/top/disks/new-hdd/zhy/Tree-DETR
+export MOWODB_DATA_ROOT="$PROJECT_ROOT/data/derived/m-owodb-voc"
+export MOWODB_OUTPUT_ROOT="$PROJECT_ROOT/exps/owod/m-owodb/order0/official/baselines"
+mkdir -p "$MOWODB_OUTPUT_ROOT/owobj/logs"
+cd "$PROJECT_ROOT/baselines/owobj"
 set -o pipefail
 CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 \
-  ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK_SHARED.sh 2>&1 | tee exps/MOWODB/owobj_train.log
+  ./tools/run_dist_launch.sh 2 configs/M_OWOD_BENCHMARK_SHARED.sh \
+  2>&1 | tee "$MOWODB_OUTPUT_ROOT/owobj/logs/train.log"
 # 按 Ctrl-b d 脱离
 
 tmux attach -t mowodb-owobj
 CUDA_VISIBLE_DEVICES=0,1 GPUS_PER_NODE=2 \
-  ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK_SHARED.sh 2>&1 | tee exps/MOWODB/owobj_eval.log
+  ./tools/run_dist_launch.sh 2 configs/EVAL_M_OWOD_BENCHMARK_SHARED.sh \
+  2>&1 | tee "$MOWODB_OUTPUT_ROOT/owobj/logs/eval.log"
 ```
 
 查看运行状态：
@@ -164,9 +172,9 @@ tmux attach -t mowodb-owobj
 本服务器按当前约定固定使用 GPU `0,1`；因此 `CUDA_VISIBLE_DEVICES=0,1`、
 `GPUS_PER_NODE=2` 和 launcher 参数 `2` 必须保持一致，不要改成 `4`。
 
-输出目录：PROB 为 `tmp/PROB/exps/MOWODB/PROB/`，OWOBJ 为
-`tmp/OWOBJ/exps/MOWODB/OWOBJ/`。评估日志和 checkpoint 必须和对应 commit、
-环境、GPU 数量一起保存。
+输出目录统一为根目录 `exps/owod/m-owodb/order0/official/baselines/`：PROB
+位于 `prob/`，OWOBJ 位于 `owobj/`。checkpoint、指标和 `logs/` 不再写入外部
+源码 checkout。
 
 Tree-DETR/你的 idea 也必须使用同一 `split_manifest.json`、同一类别顺序和
 `instances_val2017_full.json` 全类验证。运行你自己的四阶段训练入口时，固定
@@ -182,7 +190,7 @@ CAT 的论文代码链接当前无法访问，仓库中没有可验证的训练�
 python tools/owod/prepare_external_baselines.py \
   --methods cat \
   --cat-repo <verified-CAT-repository-url-or-local-path> \
-  --repo-root exps/external_baselines/repos
+  --repo-root baselines
 ```
 
 在确认入口、数据协议和许可证后，再把作者的训练/评估命令写入 manifest；

@@ -72,12 +72,12 @@ memory 的 OW-DETR 适配结果作公平性结论。
 
 ## 文件与环境
 
-将 `tools/owod/run_stage1_diagnostics.py` 同步到服务器同名目录。提供的 ZIP 中只包含这个新增脚本、其测试和本文，不包含模型代码或训练数据。ZIP 应解压在 Tree-DETR 根目录。
+服务器需同步 `tools/owod/run_stage1_diagnostics.py`、其测试和本文对应的当前版本。
+项目不再保存发布 ZIP，也不包含模型代码或训练数据的复制包。
 
 ```bash
 cd ~/disks/new-hdd/zhy/Tree-DETR
 conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
-python -m zipfile -e stage1_diagnostics_tools.zip .
 python tools/owod/run_stage1_diagnostics.py --dry-run
 ```
 
@@ -182,12 +182,13 @@ D3 同时扩大 LoRA 深度和开放检测头，是适配方案的整体实验�
 
 ### 同步与启动
 
-本次不只修改了启动器。服务器需要同步 `main.py`、`models/graph_local/lora.py`、`tools/owod/run_stage1_diagnostics.py`。本地 `exps/diagnostic_tools/stage1_d3_tools.zip` 包含上述三份代码、本操作说明和两份测试文件。将包传到服务器仓库根目录后执行以下命令；解压会更新包内列出的同名文件。
+本次不只修改了启动器。服务器需要同步 `main.py`、`models/graph_local/lora.py`、
+`tools/owod/run_stage1_diagnostics.py` 及相关测试。项目不再保存发布 ZIP；使用
+Git 同步当前仓库，或按这些路径逐个同步文件，不要把实验输出打包进源码目录。
 
 ```bash
 cd ~/disks/new-hdd/zhy/Tree-DETR
 conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
-python -m zipfile -e stage1_d3_tools.zip .
 
 OUT="$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2"
 if python tools/owod/run_stage1_diagnostics.py \
@@ -247,12 +248,13 @@ D4 相比 D2 仅将 `--lr_backbone` 设为 `0`，并清理无效的 LoRA 配置�
 
 ### 同步与启动 D4
 
-将本地 `exps/diagnostic_tools/stage1_d4_tools.zip` 传到服务器仓库根目录。包包含当前 `main.py`、诊断启动器、已有 LoRA 依赖、相关测试和本文。它只更新这些文件，不包含实验数据或权重。D3 若仍占用 GPU 0、1，应先等待其退出或单独结束 D3，再启动 D4；当前助手没有远程执行停止或启动操作。
+服务器需先同步当前仓库中的 `main.py`、诊断启动器、已有 LoRA 依赖和相关测试。
+项目不再保存发布 ZIP，也不把实验数据或权重复制到源码目录。D3 若仍占用 GPU 0、1，
+应先等待其退出或单独结束 D3，再启动 D4；当前助手没有远程执行停止或启动操作。
 
 ```bash
 cd ~/disks/new-hdd/zhy/Tree-DETR
 conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
-python -m zipfile -e stage1_d4_tools.zip .
 
 OUT="$PWD/exps/owod/m-owodb/order0/pilot_unverified/stage1_diagnostics_v2"
 if python tools/owod/run_stage1_diagnostics.py \

@@ -30,12 +30,13 @@ Cosine 读取原 Stage 0 最后一个 decoder 分类头的行向量，计算新�
 
 ## 同步
 
-上传本地 `exps/diagnostic_tools/d2_followups_tools.zip` 到服务器仓库根目录。包只包含新增启动器、测试和本文，不替换模型、训练入口或已有 baseline 启动器。现有服务器需要保留之前已同步的 D2/D4 和 paper baseline 工具。
+服务器需同步当前仓库中的新增启动器、测试和本文。项目不再保存发布 ZIP；按 Git
+提交或对应源码路径同步文件，不替换模型、训练入口或已有 baseline 启动器。现有服务器
+需要保留之前已同步的 D2/D4 和 paper baseline 工具。
 
 ```bash
 cd ~/disks/new-hdd/zhy/Tree-DETR
 conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
-python -m zipfile -e d2_followups_tools.zip .
 python -m unittest tools.owod.tests.test_d2_followups tools.owod.tests.test_stage1_diagnostics
 ```
 

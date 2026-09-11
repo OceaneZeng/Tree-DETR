@@ -20,6 +20,11 @@ except ModuleNotFoundError:  # Importing this utility as tools.owod.prepare_shar
     from tools.owod.protocol import stage_files as validated_stage_files
 
 
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_OUTPUT = ROOT / "data" / "derived" / "m-owodb-voc"
+DEFAULT_BASELINE_ROOT = ROOT / "baselines"
+
+
 def read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -137,16 +142,22 @@ def prepare_one(output: Path, train: dict, val: dict, stage_payloads: list[dict[
             write_split("test", test_names, dataset)
 
 
-def write_shared_configs(output: Path) -> list[Path]:
+def write_shared_configs(repo: Path, method: str) -> list[Path]:
     """Create non-destructive 20/20/20/20 variants beside each checkout."""
-    repo = output.parent.parent
     configs = repo / "configs"
     generated = []
     for name in ("M_OWOD_BENCHMARK.sh", "EVAL_M_OWOD_BENCHMARK.sh"):
         source = configs / name
         if not source.is_file():
-            continue
+            raise FileNotFoundError(f"Missing baseline config: {source}")
         content = source.read_text(encoding="utf-8")
+        original_output = {
+            "prob": "EXP_DIR=exps/MOWODB/PROB",
+            "owobj": "EXP_DIR=exps/MOWODB/OWOBJ",
+        }[method]
+        content = content.replace(
+            original_output,
+            f'EXP_DIR="${{MOWODB_OUTPUT_ROOT:?Set MOWODB_OUTPUT_ROOT}}/{method}"')
         content = content.replace("--dataset OWDETR", "--dataset TOWOD")
         # OWOBJ's published recipe is 19/21/20/20; M-OWODB comparison is 20
         # classes per increment. Only the argument values are changed.
@@ -159,7 +170,8 @@ def write_shared_configs(output: Path) -> list[Path]:
         content = content.replace("--lr 2e-5\\--lr 2e-5", "--lr 2e-5")
         content = content.replace(
             "PY_ARGS=${@:1}",
-            'PY_ARGS="${@:1} --dataset TOWOD --data_root ./data/OWOD"')
+            'PY_ARGS="${@:1} --dataset TOWOD '
+            '--data_root ${MOWODB_DATA_ROOT:?Set MOWODB_DATA_ROOT}"')
         target = configs / name.replace(".sh", "_SHARED.sh")
         target.write_text(content, encoding="utf-8")
         generated.append(target)
@@ -172,8 +184,10 @@ def main(argv=None) -> int:
                         help="Full instances_train2017.json, not a stage subset")
     parser.add_argument("--val-coco", type=Path, required=True,
                         help="Full instances_val2017.json")
-    parser.add_argument("--output", type=Path, action="append", required=True,
-                        help="Method data/OWOD directory; repeat for PROB and OWOBJ")
+    parser.add_argument("--output", type=Path, default=DEFAULT_DATA_OUTPUT,
+                        help="Single shared VOC view used by every external baseline")
+    parser.add_argument("--baseline-root", type=Path, default=DEFAULT_BASELINE_ROOT,
+                        help="Directory containing prob/ and owobj/ checkouts")
     parser.add_argument("--image-root", type=Path, action="append", default=[],
                         help="COCO image directory; repeat for train2017 and val2017")
     parser.add_argument("--image-mode", choices=("none", "copy", "symlink"), default="none",
@@ -197,12 +211,13 @@ def main(argv=None) -> int:
     image_roots = [path.resolve() for path in args.image_root]
     if args.image_mode != "none" and not image_roots:
         raise ValueError("--image-root is required when --image-mode is copy or symlink")
-    for output in args.output:
-        prepare_one(output, train, val, payloads, args.clean, image_roots, args.image_mode)
-        generated = write_shared_configs(output)
+    output = args.output.resolve()
+    prepare_one(output, train, val, payloads, args.clean, image_roots, args.image_mode)
+    for method in ("prob", "owobj"):
+        generated = write_shared_configs(args.baseline_root / method, method)
         for path in generated:
             print(f"generated {path}")
-        print(f"prepared {output}")
+    print(f"prepared shared data {output}")
     return 0
 
 
