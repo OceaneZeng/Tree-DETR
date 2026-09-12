@@ -38,6 +38,9 @@ def parse_args(argv=None):
                         help="D2 graph directory containing run_config.json and checkpoint.pth")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--task-checkpoints", nargs=4, type=Path,
+                        metavar=('TASK1', 'TASK2', 'TASK3', 'TASK4'),
+                        help="Draw one 2x2 figure with a shared legend from four D2 checkpoints")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -62,6 +65,8 @@ def parse_args(argv=None):
     parser.add_argument("--perplexity", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
+    if args.task_checkpoints and (args.checkpoint or args.before_checkpoint or args.compare_before_training):
+        parser.error('--task-checkpoints cannot be combined with single/before-after checkpoint options')
     if not 0 <= args.class_confidence <= 1:
         parser.error("--class-confidence must lie in [0, 1]")
     if not 0 <= args.background_iou < args.iou_threshold <= 1:
@@ -434,8 +439,130 @@ def project_records(records, output_dir, args, stem):
     return embedding, groups, class_ids
 
 
+def save_four_task_plot(embedding, tasks, class_ids, category_names, task_classes, output_dir):
+    plt = configure_matplotlib()
+    from matplotlib.lines import Line2D
+
+    ordered_ids = list(dict.fromkeys(c for ids in task_classes for c in ids))
+    palette = [plt.get_cmap(name)(i) for name in ('tab20', 'tab20b', 'tab20c') for i in range(20)]
+    palette += [plt.get_cmap('turbo')(i / 19) for i in range(20)]
+    colors = {c: palette[i % len(palette)] for i, c in enumerate(ordered_ids)}
+    figure = plt.figure(figsize=(17.5, 10.8), layout='constrained')
+    grid = figure.add_gridspec(2, 3, width_ratios=(5, 5, 4.5), wspace=0.05, hspace=0.08)
+    lower, upper = embedding.min(axis=0), embedding.max(axis=0)
+    padding = np.maximum((upper - lower) * 0.05, 1)
+    for index, ids in enumerate(task_classes):
+        axis = figure.add_subplot(grid[index // 2, index % 2])
+        for class_id in ids:
+            selected = (tasks == f'Task {index + 1}') & (class_ids == class_id)
+            if selected.any():
+                axis.scatter(embedding[selected, 0], embedding[selected, 1], s=7,
+                             color=colors[class_id], alpha=0.8, linewidths=0, rasterized=True)
+        axis.set_title(f'({"abcd"[index]}) Task {index + 1}', fontsize=12, pad=8)
+        axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
+        axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
+        axis.set_box_aspect(1)
+        axis.set_xticks([])
+        axis.set_yticks([])
+    legend_axis = figure.add_subplot(grid[:, 2])
+    legend_axis.axis('off')
+    present = set(class_ids.tolist())
+    handles = [Line2D([], [], marker='o', linestyle='none', markersize=4.5,
+                      markerfacecolor=colors[c], markeredgewidth=0,
+                      label=category_names.get(c, str(c)) + (' (no samples)' if c not in present else ''))
+               for c in ordered_ids]
+    legend_axis.legend(handles=handles, title='Classes', ncol=2, loc='center left',
+                       frameon=False, fontsize=8, title_fontsize=10, labelspacing=0.85,
+                       columnspacing=1.2, handletextpad=0.5, borderaxespad=0)
+    figure.savefig(output_dir / 'd2_four_tasks_distribution.pdf', bbox_inches='tight')
+    figure.savefig(output_dir / 'd2_four_tasks_distribution.png', dpi=400, bbox_inches='tight')
+    plt.close(figure)
+
+
+def four_task_class_sets(manifest):
+    stages = manifest.get('stages', [])
+    if len(stages) != 4:
+        raise ValueError('Four-task visualization requires a four-stage manifest')
+    known, task_classes = [], []
+    for stage in stages:
+        current = [int(c) for c in stage['classes']]
+        if not current or len(set(current)) != len(current) or set(known) & set(current):
+            raise ValueError('Manifest must introduce distinct classes in each task')
+        known.extend(current)
+        if set(stage['active_classes']) != set(known):
+            raise ValueError('Manifest active_classes must equal cumulative learned classes')
+        task_classes.append(list(known))
+    return task_classes
+
+
+def run_four_tasks(args):
+    import torch
+    from datasets import build_dataset
+    from tools.owod.protocol import file_sha256
+
+    config_path = (args.config or args.run_dir / 'run_config.json').resolve()
+    config = read_json(config_path)
+    manifest_path = Path(config['owod_manifest']).resolve()
+    task_classes = four_task_class_sets(read_json(manifest_path))
+    checkpoints = [path.resolve() for path in args.task_checkpoints]
+    if len(set(checkpoints)) != 4:
+        raise ValueError('Supply four distinct checkpoints in Task 1 to Task 4 order')
+    for path in checkpoints:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    device = torch.device(args.device)
+    if device.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA is unavailable')
+    detector_args = detector_args_from_config(config, args)
+    dataset = build_dataset('val', detector_args)
+    observed = {int(ann['category_id']) for ann in dataset.coco.anns.values()}
+    if not set(task_classes[-1]).issubset(observed):
+        raise ValueError('Use full validation annotations containing all four tasks')
+    category_names = {int(c): item['name'] for c, item in dataset.coco.cats.items()}
+    combined, audits = [], []
+    for index, checkpoint in enumerate(checkpoints):
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        known = set(task_classes[index])
+        previous = set(task_classes[index - 1]) if index else set()
+        print(f'Extracting Task {index + 1}: {checkpoint}', flush=True)
+        model = load_d2_model(detector_args, checkpoint, device)
+        with torch.inference_mode():
+            records = extract_features(model, dataset, device, args, previous, known - previous)
+        selected, audit = select_class_records(
+            records, known, args.class_confidence, args.max_per_class, args.seed, args.class_filter)
+        if len(selected) < 3:
+            raise ValueError(f'Task {index + 1} has fewer than three selected known objects')
+        combined.extend({**record, 'group': f'Task {index + 1}'} for record in selected)
+        audits.append({'task': index + 1, 'checkpoint': str(checkpoint),
+                       'checkpoint_sha256': file_sha256(checkpoint), 'class_counts': audit})
+        del model, records, selected
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f'Jointly projecting {len(combined)} features from all four tasks...', flush=True)
+    embedding, tasks, class_ids = project_records(combined, output_dir, args, 'four_tasks_features')
+    save_four_task_plot(embedding, tasks, class_ids, category_names, task_classes, output_dir)
+    (output_dir / 'four_tasks_summary.json').write_text(json.dumps({
+        'tasks': audits, 'manifest': str(manifest_path), 'config': str(config_path),
+        'seed': args.seed, 'max_per_class': args.max_per_class, 'max_images': args.max_images,
+        'iou_threshold': args.iou_threshold, 'class_filter': args.class_filter,
+        'class_confidence': args.class_confidence, 'perplexity_requested': args.perplexity,
+        'category_names': category_names, 'feature': 'final decoder query',
+        'validation_annotation': str(detector_args.val_ann),
+        'selection': 'same validation input; each task includes its cumulative known classes; per-class cap',
+        'projection': 'joint L2-normalized PCA and t-SNE without category-dependent transforms',
+        'note': 'Checkpoint order supplied by user. Colors are shared; distances are qualitative.'
+    }, indent=2) + '\n', encoding='utf-8')
+    print(f'Saved four-task figure to {output_dir}', flush=True)
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.task_checkpoints:
+        return run_four_tasks(args)
     import torch
     from datasets import build_dataset
     run_dir = args.run_dir.resolve()
