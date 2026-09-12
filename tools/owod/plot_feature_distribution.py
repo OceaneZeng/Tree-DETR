@@ -47,7 +47,15 @@ def parse_args(argv=None):
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--background-iou", type=float, default=0.1)
     parser.add_argument("--background-per-image", type=int, default=2)
-    parser.add_argument("--max-per-class", type=int, default=100)
+    parser.add_argument("--max-per-class", type=int, default=200)
+    parser.add_argument("--class-filter", choices=('matched', 'correct'), default='matched',
+                        help="Use all IoU-matched known objects, or only confident correct predictions")
+    parser.add_argument("--compare-before-training", action='store_true',
+                        help="Compare with the initialization checkpoint recorded as pretrained")
+    parser.add_argument("--before-checkpoint", type=Path,
+                        help="Explicit same-architecture checkpoint for the before/after comparison")
+    parser.add_argument("--comparison-classes", choices=('current', 'known'), default='current',
+                        help="Compare newly learned classes by default; known compares all known classes")
     parser.add_argument("--class-confidence", type=float, default=0.3,
                         help="Class plot only: require correct known-class prediction and this confidence")
     parser.add_argument("--max-per-group", type=int, default=1000)
@@ -152,6 +160,7 @@ def match_image(features, pred_boxes, pred_logits, target, previous_ids, current
                 "class_id": class_id,
                 "image_id": image_id,
                 "query_id": query_index,
+                "gt_index": gt_index,
                 "iou": overlap,
                 "predicted_class_id": int(predictions[query_index]),
                 "confidence": float(scores[query_index]),
@@ -172,6 +181,7 @@ def match_image(features, pred_boxes, pred_logits, target, previous_ids, current
                 "class_id": -1,
                 "image_id": image_id,
                 "query_id": query_index,
+                "gt_index": -1,
                 "iou": float(max_iou[query_index]),
                 "predicted_class_id": int(predictions[query_index]),
                 "confidence": float(scores[query_index]),
@@ -241,7 +251,8 @@ def group_balanced_indices(groups, max_per_group: int, seed: int):
     return sorted(selected)
 
 
-def select_class_records(records, known_ids, confidence, max_per_class, seed):
+def select_class_records(records, known_ids, confidence, max_per_class, seed,
+                         class_filter='matched'):
     buckets = {class_id: [] for class_id in sorted(known_ids)}
     before = dict.fromkeys(buckets, 0)
     for record in records:
@@ -249,18 +260,37 @@ def select_class_records(records, known_ids, confidence, max_per_class, seed):
         if class_id not in buckets:
             continue
         before[class_id] += 1
-        if (record['predicted_class_id'] == class_id
-                and record['confidence'] >= confidence):
+        if (class_filter == 'matched' or (record['predicted_class_id'] == class_id
+                and record['confidence'] >= confidence)):
             buckets[class_id].append(record)
-    available = [len(items) for items in buckets.values() if items]
-    count = min([max_per_class] + available) if available else 0
     rng = random.Random(seed)
     selected = [record for items in buckets.values()
-                for record in rng.sample(items, min(count, len(items)))]
+                for record in rng.sample(items, min(max_per_class, len(items)))]
     audit = {str(class_id): {'matched': before[class_id], 'eligible': len(items),
-                            'plotted': min(count, len(items))}
+                            'plotted': min(max_per_class, len(items))}
              for class_id, items in buckets.items()}
     return selected, audit
+
+
+def paired_class_records(before, after, class_ids, limit, seed):
+    # Query IDs can change across checkpoints; match the actual annotated object.
+    def key(record):
+        return record['image_id'], record['gt_index'], record['class_id']
+
+    before_index = {key(r): r for r in before if r['class_id'] in class_ids}
+    after_index = {key(r): r for r in after if r['class_id'] in class_ids}
+    rng = random.Random(seed)
+    selected_keys, audit = [], {}
+    for class_id in sorted(class_ids):
+        left = {k for k in before_index if k[2] == class_id}
+        right = {k for k in after_index if k[2] == class_id}
+        common = sorted(left & right)
+        chosen = sorted(rng.sample(common, min(limit, len(common))))
+        selected_keys.extend(chosen)
+        audit[str(class_id)] = {'before_matched': len(left), 'after_matched': len(right),
+                                'paired': len(common), 'plotted_per_panel': len(chosen)}
+    return ([before_index[k] for k in selected_keys],
+            [after_index[k] for k in selected_keys], audit)
 
 
 def tsne_embedding(features: np.ndarray, perplexity: float, seed: int) -> np.ndarray:
@@ -327,24 +357,33 @@ def save_group_plot(embedding, groups, output_dir, max_per_group, seed):
     plt.close(figure)
 
 
-def save_class_plot(embedding, groups, class_ids, category_names, output_dir):
+def save_class_plot(embedding, groups, class_ids, category_names, output_dir,
+                    panel_groups=('Previous', 'Current'),
+                    titles=('(a) Previous classes', '(b) Current classes'),
+                    stem='d2_class_distribution', shared_colors=False):
     plt = configure_matplotlib()
-    figure = plt.figure(figsize=(14.8, 5.5), layout='constrained')
+    max_classes = max(len(set(class_ids[groups == group])) for group in panel_groups)
+    figure = plt.figure(figsize=(14.8, max(5.5, max_classes * 0.23)), layout='constrained')
     grid = figure.add_gridspec(1, 4, width_ratios=(4.4, 1.5, 4.4, 1.5), wspace=0.06)
     axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 2])]
     legend_axes = [figure.add_subplot(grid[0, 1]), figure.add_subplot(grid[0, 3])]
     color_map = plt.get_cmap("tab20")
+    all_ids = sorted(set(class_ids.tolist()))
+    if len(all_ids) > 20 and shared_colors:
+        colors = {class_id: plt.get_cmap('turbo')(i / max(1, len(all_ids) - 1))
+                  for i, class_id in enumerate(all_ids)}
+    else:
+        colors = {class_id: color_map(i % 20) for i, class_id in enumerate(all_ids)}
     lower, upper = embedding.min(axis=0), embedding.max(axis=0)
     padding = np.maximum((upper - lower) * 0.06, 1)
     for axis, legend_axis, group, title, marker in zip(
-            axes, legend_axes, ("Previous", "Current"), ("(a) Previous classes", "(b) Current classes"),
-            ("o", "s")):
+            axes, legend_axes, panel_groups, titles, ("o", "o")):
         ids = sorted(set(class_ids[groups == group].tolist()))
         for color_index, class_id in enumerate(ids):
             mask = (groups == group) & (class_ids == class_id)
             axis.scatter(embedding[mask, 0], embedding[mask, 1], s=12,
-                         color=color_map(color_index % 20), marker=marker,
-                         alpha=0.85, linewidths=0, rasterized=True,
+                         color=colors[class_id] if shared_colors else color_map(color_index % 20),
+                         marker=marker, alpha=0.8, linewidths=0, rasterized=True,
                          label=category_names.get(class_id, str(class_id)))
         axis.set_title(title)
         axis.set_xlabel("t-SNE dimension 1")
@@ -359,8 +398,8 @@ def save_class_plot(embedding, groups, class_ids, category_names, output_dir):
                            markerscale=1.5, loc='center left', borderaxespad=0,
                            handletextpad=0.4, labelspacing=0.7)
     axes[0].set_ylabel("t-SNE dimension 2")
-    figure.savefig(output_dir / "d2_class_distribution.pdf", bbox_inches="tight")
-    figure.savefig(output_dir / "d2_class_distribution.png", dpi=600, bbox_inches="tight")
+    figure.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
+    figure.savefig(output_dir / f"{stem}.png", dpi=600, bbox_inches="tight")
     plt.close(figure)
 
 
@@ -406,6 +445,17 @@ def main(argv=None):
         if not path.is_file():
             raise FileNotFoundError(path)
     config = read_json(config_path)
+    before_path = args.before_checkpoint
+    if args.compare_before_training and before_path is None:
+        if not config.get('pretrained'):
+            raise ValueError('No initialization checkpoint recorded; supply --before-checkpoint')
+        before_path = Path(config['pretrained'])
+    if before_path is not None:
+        before_path = before_path.resolve()
+        if not before_path.is_file():
+            raise FileNotFoundError(before_path)
+        if before_path == checkpoint_path:
+            raise ValueError('Before and after checkpoints must be different files')
     previous_ids = {int(value) for value in config.get("owod_previous_class_ids") or []}
     current_ids = {int(value) for value in config.get("owod_current_class_ids") or []}
     known_ids = {int(value) for value in config.get("owod_known_class_ids") or []}
@@ -432,7 +482,7 @@ def main(argv=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     category_names = {int(key): value["name"] for key, value in dataset.coco.cats.items()}
     class_records, audit = select_class_records(
-        records, known_ids, args.class_confidence, args.max_per_class, args.seed)
+        records, known_ids, args.class_confidence, args.max_per_class, args.seed, args.class_filter)
     all_groups = merge_known_groups([r['group'] for r in records])
     selected = group_balanced_indices(all_groups, args.max_per_group, args.seed)
     group_records = [{**records[index], 'group': str(all_groups[index])}
@@ -447,6 +497,39 @@ def main(argv=None):
         save_class_plot(class_embedding, class_groups, class_ids, category_names, output_dir)
     else:
         print('Class plot skipped: fewer than three eligible known objects.', flush=True)
+    comparison = None
+    if before_path is not None:
+        del model
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        print(f'Extracting before-training checkpoint: {before_path}', flush=True)
+        model = load_d2_model(detector_args, before_path, device)
+        with torch.inference_mode():
+            before_records = extract_features(model, dataset, device, args, previous_ids, current_ids)
+        comparison_ids = current_ids if args.comparison_classes == 'current' else known_ids
+        before, after, pair_audit = paired_class_records(
+            before_records, records, comparison_ids, args.max_per_class, args.seed)
+        comparison = {'before_checkpoint': str(before_path), 'after_checkpoint': str(checkpoint_path),
+                      'class_scope': args.comparison_classes, 'class_counts': pair_audit,
+                      'selection': 'same GT instances with IoU >= threshold in both checkpoints; no correctness filter',
+                      'projection': 'joint L2 normalization, PCA and t-SNE; no label-dependent offsets',
+                      'plotted': len(before) >= 3}
+        if len(before) >= 3:
+            paired = [{**r, 'group': panel} for panel, batch in (('Before', before), ('After', after))
+                      for r in batch]
+            pair_embedding, pair_groups, pair_ids = project_records(
+                paired, output_dir, args, 'before_after_features')
+            save_class_plot(pair_embedding, pair_groups, pair_ids, category_names, output_dir,
+                            panel_groups=('Before', 'After'),
+                            titles=('(a) Before D2 training', '(b) After D2 training'),
+                            stem='d2_before_after_distribution', shared_colors=True)
+            (output_dir / 'before_after_pairs.json').write_text(json.dumps([
+                {'image_id': left['image_id'], 'gt_index': left['gt_index'], 'class_id': left['class_id'],
+                 'before_query_id': left['query_id'], 'after_query_id': right['query_id'],
+                 'before_iou': left['iou'], 'after_iou': right['iou']}
+                for left, right in zip(before, after)], indent=2) + '\n', encoding='utf-8')
+        else:
+            print('Before/after plot skipped: fewer than three shared matched targets.', flush=True)
     counts = {group: int((groups == group).sum()) for group in GROUP_ORDER}
     (output_dir / "summary.json").write_text(json.dumps({
         "run_dir": str(run_dir), "checkpoint": str(checkpoint_path),
@@ -457,8 +540,10 @@ def main(argv=None):
         "iou_threshold": args.iou_threshold, "background_iou": args.background_iou,
         "class_confidence": args.class_confidence, "class_counts": audit,
         "missing_classes": [key for key, value in audit.items() if not value['eligible']],
-        "class_filter": "correct raw-logit argmax and confidence >= threshold",
-        "class_sampling": "equal count across classes with eligible samples; absent classes reported",
+        "class_filter": args.class_filter,
+        "class_sampling": "independent per-class cap; all available samples retained below cap",
+        "max_per_class": args.max_per_class,
+        "before_after_comparison": comparison,
         "projection": "independent group/class PCA+t-SNE; both class panels share the known-only fit",
         "perplexity_requested": args.perplexity,
         "category_names": category_names,
