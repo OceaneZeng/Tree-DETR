@@ -528,11 +528,13 @@ def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
                      for group in GROUP_ORDER if np.any(group_names == group)]
     # A single figure-level legend avoids repeating 80 class labels in every
     # panel. Group handles are included in that same legend.
-    figure.legend(group_handles + class_handles, [h.get_label() for h in group_handles + class_handles],
-                  title='Groups and classes', ncol=9, loc='lower center',
-                  bbox_to_anchor=(0.5, 0.015), frameon=False, fontsize=7.2,
-                  title_fontsize=9, labelspacing=0.55, columnspacing=1.05,
-                  handletextpad=0.35, borderaxespad=0)
+    figure.legend(
+        group_handles + class_handles,
+        [h.get_label() for h in group_handles + class_handles],
+        title='Groups and classes', ncol=14, mode='expand', loc='lower left',
+        bbox_to_anchor=(0.035, 0.015, 0.93, 0.18), frameon=False,
+        fontsize=7.2, title_fontsize=9, labelspacing=0.55,
+        columnspacing=1.0, handletextpad=0.35, borderaxespad=0)
     figure.savefig(output_dir / 'd2_four_tasks_distribution.pdf', bbox_inches='tight')
     figure.savefig(output_dir / 'd2_four_tasks_distribution.png', dpi=500, bbox_inches='tight')
     plt.close(figure)
