@@ -40,7 +40,7 @@ def parse_args(argv=None):
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--task-checkpoints", nargs=4, type=Path,
                         metavar=('TASK1', 'TASK2', 'TASK3', 'TASK4'),
-                        help="Draw one 2x2 figure with a shared legend from four D2 checkpoints")
+                        help="Draw a 2x4 class/group figure with one shared legend from four D2 checkpoints")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -439,7 +439,23 @@ def project_records(records, output_dir, args, stem):
     return embedding, groups, class_ids
 
 
-def save_four_task_plot(embedding, tasks, class_ids, category_names, task_classes, output_dir):
+def select_task_records(records, known_ids, args):
+    """Keep every sampled known point in both rows; cap other groups separately."""
+    selected, audit = select_class_records(
+        records, known_ids, args.class_confidence, args.max_per_class,
+        args.seed, args.class_filter)
+    selected = [{**record, 'group': 'Known'} for record in selected]
+    rng = random.Random(args.seed)
+    for group in ('Unknown', 'Background'):
+        candidates = [r for r in records if r['group'] == group]
+        selected.extend({**r, 'group': group} for r in
+                        rng.sample(candidates, min(args.max_per_group, len(candidates))))
+    counts = {group: sum(r['group'] == group for r in selected) for group in GROUP_ORDER}
+    return selected, audit, counts
+
+
+def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
+                       task_classes, output_dir):
     plt = configure_matplotlib()
     from matplotlib.lines import Line2D
 
@@ -447,35 +463,78 @@ def save_four_task_plot(embedding, tasks, class_ids, category_names, task_classe
     palette = [plt.get_cmap(name)(i) for name in ('tab20', 'tab20b', 'tab20c') for i in range(20)]
     palette += [plt.get_cmap('turbo')(i / 19) for i in range(20)]
     colors = {c: palette[i % len(palette)] for i, c in enumerate(ordered_ids)}
-    figure = plt.figure(figsize=(17.5, 10.8), layout='constrained')
-    grid = figure.add_gridspec(2, 3, width_ratios=(5, 5, 4.5), wspace=0.05, hspace=0.08)
-    lower, upper = embedding.min(axis=0), embedding.max(axis=0)
-    padding = np.maximum((upper - lower) * 0.05, 1)
+    # Keep the four columns aligned: the top row shows class clusters and the
+    # bottom row shows the same task's Known/Unknown/Background composition.
+    figure = plt.figure(figsize=(18.5, 12.6))
+    grid = figure.add_gridspec(2, 4, wspace=0.06, hspace=0.16,
+                               top=0.93, bottom=0.24, left=0.045, right=0.99)
+    task_names = np.asarray(tasks)
+    group_names = merge_known_groups(groups)
+    panel_letters = 'abcdefgh'
     for index, ids in enumerate(task_classes):
-        axis = figure.add_subplot(grid[index // 2, index % 2])
+        task_points = embedding[task_names == f'Task {index + 1}']
+        lower, upper = task_points.min(axis=0), task_points.max(axis=0)
+        padding = np.maximum((upper - lower) * 0.05, 1)
+        class_axis = figure.add_subplot(grid[0, index])
         for class_id in ids:
-            selected = (tasks == f'Task {index + 1}') & (class_ids == class_id)
+            selected = ((task_names == f'Task {index + 1}') &
+                        (class_ids == class_id))
             if selected.any():
-                axis.scatter(embedding[selected, 0], embedding[selected, 1], s=7,
+                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=8,
                              color=colors[class_id], alpha=0.8, linewidths=0, rasterized=True)
-        axis.set_title(f'({"abcd"[index]}) Task {index + 1}', fontsize=12, pad=8)
-        axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
-        axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
-        axis.set_box_aspect(1)
-        axis.set_xticks([])
-        axis.set_yticks([])
-    legend_axis = figure.add_subplot(grid[:, 2])
-    legend_axis.axis('off')
+        class_axis.set_title(f'({panel_letters[index]}) Task {index + 1}: known classes',
+                             fontsize=11, pad=7)
+        class_axis.set_ylabel('t-SNE 2' if index == 0 else '')
+        class_axis.set_xlabel('t-SNE 1')
+        class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
+        class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
+        class_axis.set_box_aspect(1)
+        class_axis.set_xticks([])
+        class_axis.set_yticks([])
+
+        group_axis = figure.add_subplot(grid[1, index])
+        task_mask = task_names == f'Task {index + 1}'
+        # Plot Background first so Known and Unknown remain readable on top.
+        for group in ('Background', 'Unknown', 'Known'):
+            selected = task_mask & (group_names == group)
+            if selected.any():
+                group_axis.scatter(
+                    embedding[selected, 0], embedding[selected, 1],
+                    s=13 if group == 'Background' else 15,
+                    color=GROUP_COLORS[group], marker=GROUP_MARKERS[group],
+                    alpha=0.65 if group == 'Background' else 0.78,
+                    linewidths=0.35 if group == 'Background' else 0,
+                    rasterized=True)
+        group_axis.set_title(f'({panel_letters[index + 4]}) Task {index + 1}: groups',
+                             fontsize=11, pad=7)
+        group_axis.set_ylabel('t-SNE 2' if index == 0 else '')
+        group_axis.set_xlabel('t-SNE 1')
+        group_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
+        group_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
+        group_axis.set_box_aspect(1)
+        group_axis.set_xticks([])
+        group_axis.set_yticks([])
+
     present = set(class_ids.tolist())
-    handles = [Line2D([], [], marker='o', linestyle='none', markersize=4.5,
-                      markerfacecolor=colors[c], markeredgewidth=0,
-                      label=category_names.get(c, str(c)) + (' (no samples)' if c not in present else ''))
-               for c in ordered_ids]
-    legend_axis.legend(handles=handles, title='Classes', ncol=2, loc='center left',
-                       frameon=False, fontsize=8, title_fontsize=10, labelspacing=0.85,
-                       columnspacing=1.2, handletextpad=0.5, borderaxespad=0)
+    class_handles = [Line2D([], [], marker='o', linestyle='none', markersize=4.5,
+                             markerfacecolor=colors[c], markeredgewidth=0,
+                             label=category_names.get(c, str(c)) +
+                             (' (no samples)' if c not in present else ''))
+                     for c in ordered_ids]
+    group_handles = [Line2D([], [], marker=GROUP_MARKERS[group], linestyle='none',
+                            markersize=5, markerfacecolor=GROUP_COLORS[group],
+                            markeredgecolor=GROUP_COLORS[group],
+                            label=group)
+                     for group in GROUP_ORDER if np.any(group_names == group)]
+    # A single figure-level legend avoids repeating 80 class labels in every
+    # panel. Group handles are included in that same legend.
+    figure.legend(group_handles + class_handles, [h.get_label() for h in group_handles + class_handles],
+                  title='Groups and classes', ncol=9, loc='lower center',
+                  bbox_to_anchor=(0.5, 0.015), frameon=False, fontsize=7.2,
+                  title_fontsize=9, labelspacing=0.55, columnspacing=1.05,
+                  handletextpad=0.35, borderaxespad=0)
     figure.savefig(output_dir / 'd2_four_tasks_distribution.pdf', bbox_inches='tight')
-    figure.savefig(output_dir / 'd2_four_tasks_distribution.png', dpi=400, bbox_inches='tight')
+    figure.savefig(output_dir / 'd2_four_tasks_distribution.png', dpi=500, bbox_inches='tight')
     plt.close(figure)
 
 
@@ -489,7 +548,7 @@ def four_task_class_sets(manifest):
         if not current or len(set(current)) != len(current) or set(known) & set(current):
             raise ValueError('Manifest must introduce distinct classes in each task')
         known.extend(current)
-        if set(stage['active_classes']) != set(known):
+        if {int(c) for c in stage['active_classes']} != set(known):
             raise ValueError('Manifest active_classes must equal cumulative learned classes')
         task_classes.append(list(known))
     return task_classes
@@ -516,10 +575,12 @@ def run_four_tasks(args):
     detector_args = detector_args_from_config(config, args)
     dataset = build_dataset('val', detector_args)
     observed = {int(ann['category_id']) for ann in dataset.coco.anns.values()}
-    if not set(task_classes[-1]).issubset(observed):
-        raise ValueError('Use full validation annotations containing all four tasks')
+    if set(task_classes[-1]) != observed:
+        raise ValueError('Use full validation annotations containing exactly the manifest classes')
     category_names = {int(c): item['name'] for c, item in dataset.coco.cats.items()}
-    combined, audits = [], []
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    embeddings, task_labels, group_labels, all_class_ids, audits = [], [], [], [], []
     for index, checkpoint in enumerate(checkpoints):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
@@ -530,31 +591,40 @@ def run_four_tasks(args):
         model = load_d2_model(detector_args, checkpoint, device)
         with torch.inference_mode():
             records = extract_features(model, dataset, device, args, previous, known - previous)
-        selected, audit = select_class_records(
-            records, known, args.class_confidence, args.max_per_class, args.seed, args.class_filter)
-        if len(selected) < 3:
+        selected, audit, counts = select_task_records(records, known, args)
+        if counts['Known'] < 3:
             raise ValueError(f'Task {index + 1} has fewer than three selected known objects')
-        combined.extend({**record, 'group': f'Task {index + 1}'} for record in selected)
+        print(f'Projecting Task {index + 1}: {counts}', flush=True)
+        embedding, groups, class_ids = project_records(
+            selected, output_dir, args, f'task_{index + 1}_features')
+        embeddings.append(embedding)
+        task_labels.extend([f'Task {index + 1}'] * len(selected))
+        group_labels.extend(groups.tolist())
+        all_class_ids.extend(class_ids.tolist())
+        np.savez_compressed(output_dir / f'task_{index + 1}_instances.npz',
+                            gt_indices=np.asarray([r['gt_index'] for r in selected]))
         audits.append({'task': index + 1, 'checkpoint': str(checkpoint),
-                       'checkpoint_sha256': file_sha256(checkpoint), 'class_counts': audit})
+                       'checkpoint_sha256': file_sha256(checkpoint), 'class_counts': audit,
+                       'known_class_ids': sorted(known), 'group_counts': counts,
+                       'unknown_class_ids': sorted(set(task_classes[-1]) - known)})
         del model, records, selected
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-    output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f'Jointly projecting {len(combined)} features from all four tasks...', flush=True)
-    embedding, tasks, class_ids = project_records(combined, output_dir, args, 'four_tasks_features')
-    save_four_task_plot(embedding, tasks, class_ids, category_names, task_classes, output_dir)
+    save_four_task_plot(np.concatenate(embeddings), np.asarray(task_labels),
+                        np.asarray(group_labels), np.asarray(all_class_ids),
+                        category_names, task_classes, output_dir)
     (output_dir / 'four_tasks_summary.json').write_text(json.dumps({
         'tasks': audits, 'manifest': str(manifest_path), 'config': str(config_path),
         'seed': args.seed, 'max_per_class': args.max_per_class, 'max_images': args.max_images,
         'iou_threshold': args.iou_threshold, 'class_filter': args.class_filter,
+        'max_per_group': args.max_per_group, 'background_iou': args.background_iou,
+        'background_per_image': args.background_per_image,
         'class_confidence': args.class_confidence, 'perplexity_requested': args.perplexity,
         'category_names': category_names, 'feature': 'final decoder query',
         'validation_annotation': str(detector_args.val_ann),
-        'selection': 'same validation input; each task includes its cumulative known classes; per-class cap',
-        'projection': 'joint L2-normalized PCA and t-SNE without category-dependent transforms',
-        'note': 'Checkpoint order supplied by user. Colors are shared; distances are qualitative.'
+        'selection': 'Known: per-class cap, identical points in both rows; Unknown and Background: independent per-group caps',
+        'projection': 'Separate L2-normalized PCA and t-SNE per task; identical coordinates and bounds within each column; no label-dependent transforms',
+        'note': 'Checkpoint order supplied by user. Columns are not aligned coordinate systems or a before/after comparison. Task 4 has no unknown benchmark classes. IoU matching can select different objects across tasks.'
     }, indent=2) + '\n', encoding='utf-8')
     print(f'Saved four-task figure to {output_dir}', flush=True)
 
