@@ -52,7 +52,7 @@ def parse_args(argv=None):
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--background-iou", type=float, default=0.1)
     parser.add_argument("--background-per-image", type=int, default=2)
-    parser.add_argument("--max-per-class", type=int, default=200)
+    parser.add_argument("--max-per-class", type=int, default=500)
     parser.add_argument("--class-filter", choices=('matched', 'correct'), default='matched',
                         help="Use all IoU-matched known objects, or only confident correct predictions")
     parser.add_argument("--compare-before-training", action='store_true',
@@ -558,15 +558,14 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         for class_id in ids:
             selected = task_mask & (class_ids == class_id)
             if selected.any():
-                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=8,
-                                   color=colors[class_id], alpha=0.8, linewidths=0, rasterized=True)
-        class_axis.set_title(f'Task {index + 1}: Known classes', fontsize=12, pad=8)
+                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=11,
+                                   color=colors[class_id], alpha=0.86, linewidths=0, rasterized=True)
         class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
         class_axis.set_box_aspect(1)
         class_axis.set_xticks([])
         class_axis.set_yticks([])
-        class_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.03)
+        class_figure.subplots_adjust(left=0.03, right=0.97, top=0.98, bottom=0.03)
         class_figure.savefig(output_dir / f'd2_task_{index + 1}_classes.png', dpi=500,
                              bbox_inches='tight')
         class_figure.savefig(output_dir / f'd2_task_{index + 1}_classes.pdf',
@@ -583,13 +582,12 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
                                    alpha=0.65 if group == 'Background' else 0.78,
                                    linewidths=0.35 if group == 'Background' else 0,
                                    rasterized=True)
-        group_axis.set_title(f'Task {index + 1}: Known / Unknown / Background', fontsize=12, pad=8)
         group_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         group_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
         group_axis.set_box_aspect(1)
         group_axis.set_xticks([])
         group_axis.set_yticks([])
-        group_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.03)
+        group_figure.subplots_adjust(left=0.03, right=0.97, top=0.98, bottom=0.03)
         group_figure.savefig(output_dir / f'd2_task_{index + 1}_groups.png', dpi=500,
                              bbox_inches='tight')
         group_figure.savefig(output_dir / f'd2_task_{index + 1}_groups.pdf',
