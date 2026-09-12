@@ -123,7 +123,7 @@ class DeformableTransformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
-    def forward(self, srcs, masks, pos_embeds, query_embed=None):
+    def forward(self, srcs, masks, pos_embeds, query_embed=None, cascade_decoder=False):
         assert self.two_stage or query_embed is not None
 
         # prepare input for encoder
@@ -180,7 +180,20 @@ class DeformableTransformer(nn.Module):
         hs, inter_references = self.decoder(tgt, reference_points, memory,
                                             spatial_shapes, level_start_index, valid_ratios, query_embed, mask_flatten)
 
+        if cascade_decoder:
+            location_hs, location_references = hs, inter_references
+            # CAT reuses the same decoder.  The first-pass location embeddings
+            # become the second-pass class queries; the original reference
+            # points are retained as R in paper equations (1)-(2).
+            hs, inter_references = self.decoder(
+                location_hs[-1], reference_points, memory, spatial_shapes,
+                level_start_index, valid_ratios, None, mask_flatten)
+
         inter_references_out = inter_references
+        if cascade_decoder:
+            return (hs, init_reference_out, inter_references_out,
+                    enc_outputs_class, enc_outputs_coord_unact,
+                    location_hs, location_references)
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
         return hs, init_reference_out, inter_references_out, None, None

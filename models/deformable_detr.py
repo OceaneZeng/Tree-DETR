@@ -154,7 +154,15 @@ class DeformableDETR(nn.Module):
         query_embeds = None
         if not self.two_stage:
             query_embeds = self.query_embed.weight
-        hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, query_embeds)
+        cascade_decoder = getattr(self, 'cascade_decoder', False)
+        decoded = self.transformer(srcs, masks, pos, query_embeds,
+                                   cascade_decoder=cascade_decoder)
+        if cascade_decoder:
+            (class_hs, init_reference, _class_references, enc_outputs_class,
+             enc_outputs_coord_unact, hs, inter_references) = decoded
+        else:
+            hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = decoded
+            class_hs = hs
 
         outputs_classes = []
         outputs_coords = []
@@ -185,7 +193,9 @@ class DeformableDETR(nn.Module):
             enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
             out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
         if getattr(self, 'return_baseline_features', False):
-            out['decoder_features'] = hs
+            out['decoder_features'] = class_hs
+            if cascade_decoder:
+                out['location_decoder_features'] = hs
             out['attention_feature'] = features[1].tensors
             out['padded_size'] = samples.tensors.shape[-2:]
         return out

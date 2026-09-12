@@ -192,6 +192,11 @@ def main(argv=None) -> int:
                         help="COCO image directory; repeat for train2017 and val2017")
     parser.add_argument("--image-mode", choices=("none", "copy", "symlink"), default="none",
                         help="Materialize JPEGImages (default: leave existing image store untouched)")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Use a local/pilot manifest and mark the resulting run as non-paper-comparable",
+    )
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args(argv)
     manifest_path = args.manifest.resolve()
@@ -200,13 +205,14 @@ def main(argv=None) -> int:
         raise ValueError("The shared adapter only accepts protocol=m-owodb")
     if len(manifest.get("stages", [])) != 4:
         raise ValueError("M-OWODB requires exactly four stages")
-    if not manifest.get("official_annotations"):
+    if not manifest.get("official_annotations") and not args.allow_unverified:
         raise ValueError(
-            "Refusing an unverified/pilot manifest; register official M-OWODB annotations first")
+            "Refusing an unverified/pilot manifest; pass --allow-unverified for a local consistency run")
     train, val = read(args.train_coco), read(args.val_coco)
     payloads = []
     for index in range(4):
-        _, files = validated_stage_files(manifest_path, index)
+        _, files = validated_stage_files(
+            manifest_path, index, allow_unverified=args.allow_unverified)
         payloads.append({key: read(path) for key, path in files.items()})
     image_roots = [path.resolve() for path in args.image_root]
     if args.image_mode != "none" and not image_roots:
@@ -218,6 +224,8 @@ def main(argv=None) -> int:
         for path in generated:
             print(f"generated {path}")
     print(f"prepared shared data {output}")
+    if args.allow_unverified:
+        print("WARNING: using an unverified local manifest; results are not paper-comparable")
     return 0
 
 
