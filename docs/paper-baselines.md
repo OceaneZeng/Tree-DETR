@@ -169,12 +169,12 @@ Default output root:
 `exps/owod/m-owodb/order0/pilot_unverified/paper_baselines_v1/`
 
 Each `ow-detr/stage_0` through `stage_3`, followed by `ew-detr/stage_0` through
-`stage_3`, has `console.log`, `metrics.jsonl`, `run_config.json`, `train.json`,
+`stage_3`, has `train.log`, `metrics.jsonl`, `run_config.json`, `train.json`,
 `checkpoint.pth`, and a completion marker. EW additionally has
 `checkpoint_consolidated.pth` and `consolidated_metrics.json`. Queue state is in
 `queue_status.json`; CUDA smoke output is in `preflight.log`.
 
-If a run fails, inspect its console log. After fixing an environment-only issue,
+If a run fails, inspect its `train.log`. After fixing an environment-only issue,
 resume with the same code/configuration and the interrupted stage's checkpoint:
 
 ```bash

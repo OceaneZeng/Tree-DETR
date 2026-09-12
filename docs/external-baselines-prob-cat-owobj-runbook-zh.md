@@ -1,5 +1,10 @@
 # PROB / CAT / OWOBJ 与 Tree-DETR 的统一 M-OWODB 对比
 
+> **训练入口已弃用：** 本文保留外部 checkout 的历史记录和故障排查信息。
+> 新实验请使用 `docs/internal-paper-baselines-mowodb.md` 与
+> `tools/owod/run_mowodb_reimplementations.py`，统一走 Tree-DETR 环境、评估器
+> 和 `train.log` 日志格式。
+
 目标是让 PROB、CAT、OWOBJ 和你的 Tree-DETR/idea 在同一份官方 M-OWODB
 四阶段标注、同一图像集合、同一 20/20/20/20 类别顺序和同一指标定义下比较。
 PROB/OWOBJ 的官方代码仍保留为独立 checkout；这里只增加数据适配层，不把

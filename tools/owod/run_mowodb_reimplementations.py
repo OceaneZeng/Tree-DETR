@@ -270,7 +270,9 @@ def main(argv=None):
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-queries", type=int, default=100)
+    # Match the repository's Tree-DETR/OWOD recipe rather than CAT's
+    # author-code default of 100 queries.
+    parser.add_argument("--num-queries", type=int, default=300)
     parser.add_argument("--enc-layers", type=int, default=6)
     parser.add_argument("--dec-layers", type=int, default=6)
     parser.add_argument("--eval-interval", type=int, default=1)

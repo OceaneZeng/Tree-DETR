@@ -136,7 +136,7 @@ The launcher is quiet while a child trainer is running. From another shell,
 follow the active stage with:
 
 ```bash
-tail -f "$PWD/exps/owod/m-owodb/order0/official/baselines/cat"/stage_*/console.log
+tail -f "$PWD/exps/owod/m-owodb/order0/official/baselines/cat"/stage_*/train.log
 ```
 
 EW-DETR, after CAT completes and both GPUs are idle:
@@ -162,7 +162,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -u tools/owod/run_mowodb_reimplementations.py \
 Monitor EW-DETR in another shell with:
 
 ```bash
-tail -f "$PWD/exps/owod/m-owodb/order0/official/baselines/ew-detr"/stage_*/console.log
+tail -f "$PWD/exps/owod/m-owodb/order0/official/baselines/ew-detr"/stage_*/train.log
 ```
 
 Resume an interrupted method by adding `--resume` to the identical command.

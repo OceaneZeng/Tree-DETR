@@ -4,6 +4,9 @@ The three comparison arms run inside Tree-DETR.  They share the repository
 Deformable-DETR data loader, M-OWODB stage annotations, optimizer, evaluator,
 checkpoint format, and logging.  The external `baselines/` checkouts are kept
 only as paper/source references and are never imported by the training entry.
+The default architecture is the repository recipe (ResNet-50, six encoder and
+decoder layers, 300 queries), so the comparison is aligned with the own-idea
+experiments rather than an author script's query count.
 
 ## Run
 
