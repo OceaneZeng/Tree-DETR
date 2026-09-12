@@ -19,16 +19,14 @@ sys.path.insert(0, str(ROOT))
 
 
 
-GROUP_ORDER = ("Previous", "Current", "Unknown", "Background")
+GROUP_ORDER = ("Known", "Unknown", "Background")
 GROUP_COLORS = {
-    "Previous": "#2878B5",
-    "Current": "#E6862D",
+    "Known": "#2878B5",
     "Unknown": "#C33C54",
     "Background": "#777777",
 }
 GROUP_MARKERS = {
-    "Previous": "o",
-    "Current": "s",
+    "Known": "o",
     "Unknown": "X",
     "Background": "x",
 }
@@ -226,7 +224,13 @@ def balanced_indices(records, max_per_class: int, max_background: int, seed: int
     return sorted(selected)
 
 
+def merge_known_groups(groups):
+    groups = np.asarray(groups)
+    return np.where(np.isin(groups, ("Previous", "Current")), "Known", groups)
+
+
 def group_balanced_indices(groups, max_per_group: int, seed: int):
+    groups = merge_known_groups(groups)
     rng = random.Random(seed)
     counts = [int(np.sum(groups == group)) for group in GROUP_ORDER]
     limit = min([max_per_group] + [count for count in counts if count])
@@ -300,9 +304,10 @@ def configure_matplotlib():
 
 def save_group_plot(embedding, groups, output_dir, max_per_group, seed):
     plt = configure_matplotlib()
+    groups = merge_known_groups(groups)
     indices = group_balanced_indices(groups, max_per_group=max_per_group, seed=seed)
     figure, axis = plt.subplots(figsize=(7.6, 5.2))
-    for group in ("Background", "Unknown", "Previous", "Current"):
+    for group in ("Background", "Unknown", "Known"):
         mask = np.array([index for index in indices if groups[index] == group])
         if not len(mask):
             continue
@@ -428,9 +433,10 @@ def main(argv=None):
     category_names = {int(key): value["name"] for key, value in dataset.coco.cats.items()}
     class_records, audit = select_class_records(
         records, known_ids, args.class_confidence, args.max_per_class, args.seed)
-    all_groups = np.asarray([r['group'] for r in records])
+    all_groups = merge_known_groups([r['group'] for r in records])
     selected = group_balanced_indices(all_groups, args.max_per_group, args.seed)
-    group_records = [records[index] for index in selected]
+    group_records = [{**records[index], 'group': str(all_groups[index])}
+                     for index in selected]
     print('Fitting group t-SNE...', flush=True)
     embedding, groups, _ = project_records(group_records, output_dir, args, 'features')
     save_group_plot(embedding, groups, output_dir, args.max_per_group, args.seed)
@@ -447,6 +453,7 @@ def main(argv=None):
         "validation_annotation": str(detector_args.val_ann),
         "decoder_layer": -1, "feature_dimension": len(records[0]['feature']),
         "sample_counts": counts, "seed": args.seed,
+        "group_definition": "Known = Previous + Current; Unknown and Background unchanged",
         "iou_threshold": args.iou_threshold, "background_iou": args.background_iou,
         "class_confidence": args.class_confidence, "class_counts": audit,
         "missing_classes": [key for key, value in audit.items() if not value['eligible']],
