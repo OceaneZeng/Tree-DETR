@@ -13,6 +13,7 @@ COCO dataset which returns image_id for evaluation.
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
 from pathlib import Path
+import json
 
 import torch
 import torch.utils.data
@@ -24,17 +25,30 @@ import datasets.transforms as T
 
 
 class CocoDetection(TvCocoDetection):
-    def __init__(self, img_folder, ann_file, transforms, return_masks, cache_mode=False, local_rank=0, local_size=1):
+    def __init__(self, img_folder, ann_file, transforms, return_masks, cache_mode=False,
+                 local_rank=0, local_size=1, proposal_file=None):
         super(CocoDetection, self).__init__(img_folder, ann_file,
                                             cache_mode=cache_mode, local_rank=local_rank, local_size=local_size)
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
+        self.proposal_enabled = bool(proposal_file)
+        self.proposals = {}
+        if proposal_file:
+            payload = json.loads(Path(proposal_file).read_text(encoding='utf-8'))
+            if payload.get('coordinate_format') != 'xywh_absolute':
+                raise ValueError('CAT proposal file must use xywh_absolute coordinates')
+            self.proposals = {int(key): value for key, value in payload.get('proposals', {}).items()}
 
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
+        if self.proposal_enabled:
+            proposals = torch.as_tensor(self.proposals.get(int(image_id), []), dtype=torch.float32).reshape(-1, 4)
+            if proposals.numel():
+                proposals[:, 2:] += proposals[:, :2]
+            target['proposal_boxes'] = proposals
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
@@ -192,11 +206,13 @@ def build(image_set, args):
         ann_file = Path(annotation_override)
         if not ann_file.is_absolute():
             ann_file = root / ann_file
+    proposal_file = getattr(args, 'cat_proposals', '') if image_set == 'train' else ''
     dataset = CocoDetection(img_folder, ann_file,
                             transforms=make_coco_transforms(
                                 image_set, getattr(args, 'lightweight', False),
                                 getattr(args, 'no_augmentation', False),
                                 getattr(args, 'no_random_crop', False)),
                             return_masks=args.masks,
-                            cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+                            cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size(),
+                            proposal_file=proposal_file)
     return dataset

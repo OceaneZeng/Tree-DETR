@@ -61,6 +61,12 @@ def crop(image, target, region):
         for field in fields:
             target[field] = target[field][keep]
 
+    if "proposal_boxes" in target:
+        boxes = target["proposal_boxes"] - torch.as_tensor([j, i, j, i])
+        boxes = torch.min(boxes.reshape(-1, 2, 2), max_size).clamp(min=0).reshape(-1, 4)
+        keep = torch.all(boxes[:, 2:] > boxes[:, :2], dim=1)
+        target["proposal_boxes"] = boxes[keep]
+
     return cropped_image, target
 
 
@@ -74,6 +80,11 @@ def hflip(image, target):
         boxes = target["boxes"]
         boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
         target["boxes"] = boxes
+    if "proposal_boxes" in target:
+        boxes = target["proposal_boxes"]
+        target["proposal_boxes"] = (boxes[:, [2, 1, 0, 3]]
+                                    * torch.as_tensor([-1, 1, -1, 1])
+                                    + torch.as_tensor([w, 0, w, 0]))
 
     if "masks" in target:
         target['masks'] = target['masks'].flip(-1)
@@ -124,6 +135,9 @@ def resize(image, target, size, max_size=None):
         boxes = target["boxes"]
         scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
         target["boxes"] = scaled_boxes
+    if "proposal_boxes" in target:
+        target["proposal_boxes"] = target["proposal_boxes"] * torch.as_tensor(
+            [ratio_width, ratio_height, ratio_width, ratio_height])
 
     if "area" in target:
         area = target["area"]
@@ -263,6 +277,10 @@ class Normalize(object):
             boxes = box_xyxy_to_cxcywh(boxes)
             boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
             target["boxes"] = boxes
+        if "proposal_boxes" in target:
+            boxes = box_xyxy_to_cxcywh(target["proposal_boxes"])
+            target["proposal_boxes"] = boxes / torch.tensor(
+                [w, h, w, h], dtype=torch.float32)
         return image, target
 
 

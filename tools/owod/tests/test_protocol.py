@@ -107,6 +107,23 @@ class OfficialProtocolTests(unittest.TestCase):
             self.assertEqual(loaded["validation_mode"], "unverified_pilot")
             self.assertTrue(files["train"].is_file())
 
+    def test_unverified_mode_reads_legacy_stage_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_official_tree(root)
+            manifest_path = root / "split_manifest.json"
+            manifest_path.write_text(json.dumps({
+                "schema_version": 1,
+                "annotation_root": str(root),
+                "stages": [{"index": index} for index in range(4)],
+            }), encoding="utf-8")
+
+            loaded, files = stage_files(manifest_path, 1, allow_unverified=True)
+
+            self.assertEqual(loaded["validation_mode"], "unverified_pilot")
+            self.assertTrue(files["increment_train"].is_file())
+            self.assertTrue(files["full_val"].is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

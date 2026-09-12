@@ -93,10 +93,26 @@ def stage_files(manifest_path: Path, stage: int,
     if stage < 0 or stage >= len(stages):
         raise ValueError(f"stage {stage} is outside manifest [0, {len(stages)})")
     record = stages[stage]
-    files = {
-        key: resolve_manifest_path(manifest_path, value)
-        for key, value in record["files"].items()
-    }
+    if "files" in record:
+        files = {
+            key: resolve_manifest_path(manifest_path, value)
+            for key, value in record["files"].items()
+        }
+    elif allow_unverified:
+        # The retired local builder stored only stage metadata. Resolve its
+        # stable on-disk filenames without weakening the official schema.
+        stage_dir = annotation_root / f"stage_{stage}"
+        files = {
+            "increment_train": _find_stage_file(stage_dir, (
+                "instances_increment_train2017.json",
+                "instances_increment_only_train2017.json",
+            )),
+            "train": _find_stage_file(stage_dir, ("instances_train2017.json",)),
+            "known_val": _find_stage_file(stage_dir, ("instances_val2017.json",)),
+            "full_val": _find_stage_file(stage_dir, ("instances_val2017_full.json",)),
+        }
+    else:
+        raise ValueError("Manifest stage record is missing its files mapping")
     for path in files.values():
         if not path.is_file():
             raise FileNotFoundError(f"Manifest annotation is missing: {path}")

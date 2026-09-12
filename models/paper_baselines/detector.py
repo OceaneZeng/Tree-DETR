@@ -15,6 +15,7 @@ from models.deformable_detr import build as build_base, SetCriterion
 from models.segmentation import sigmoid_focal_loss
 from util import box_ops
 from util.misc import get_world_size, is_dist_avail_and_initialized
+from .cat_modules import AdaptivePseudoLabeler, cat_pseudo_queries
 from .ew_modules import DualLoRA, QueryNormEUMix, inject_dual_lora, merge_beta
 
 
@@ -26,9 +27,18 @@ class PaperDetector(nn.Module):
         self.known_ids = list(args.owod_known_class_ids)
         self.unknown_id = 91
         detector.return_baseline_features = True
-        if self.method == 'ow-detr':
+        if self.method in ('ow-detr', 'cat'):
             self.objectness = nn.Linear(args.hidden_dim, 1)
             nn.init.constant_(self.objectness.bias, -math.log(99))
+            if self.method == 'cat':
+                detector.cascade_decoder = True
+                self.cat_adaptive = AdaptivePseudoLabeler(
+                    memory_size=args.cat_loss_memory,
+                    recent_size=args.cat_recent_window,
+                    start_iteration=args.cat_start_iteration,
+                    update_interval=args.cat_update_interval,
+                    positive_momentum=args.cat_positive_momentum,
+                    negative_momentum=args.cat_negative_momentum)
         else:
             self.adapter_layers = inject_dual_lora(detector, args.ew_rank)
             self.calibration = QueryNormEUMix(args.hidden_dim, self.known_ids)
@@ -40,15 +50,17 @@ class PaperDetector(nn.Module):
         layer_features = features if len(layers) > 1 else features[-1:]
         heads = self.detr.class_embed if len(layers) > 1 else self.detr.class_embed[-1:]
         for layer, hidden, head in zip(layers, layer_features, heads):
-            if self.method == 'ow-detr':
-                logits = layer['pred_logits']
+            if self.method in ('ow-detr', 'cat'):
+                logits = head(hidden) if self.method == 'cat' else layer['pred_logits']
                 mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
                 mask[self.known_ids + [self.unknown_id]] = False
                 layer['pred_logits'] = logits.masked_fill(mask, -1e8)
                 layer['pred_objectness'] = self.objectness(hidden)
             else:
                 layer['pred_logits'] = self.calibration(hidden, head)
-        if self.method != 'ow-detr':
+        if self.method == 'cat':
+            output.pop('location_decoder_features')
+        if self.method == 'ew-detr':
             output.pop('attention_feature')
             output.pop('padded_size')
         return output
@@ -89,7 +101,7 @@ def attention_pseudo_queries(feature, boxes, matched, padded_size, top_k=5):
 
 
 class PaperCriterion(SetCriterion):
-    def __init__(self, original, args):
+    def __init__(self, original, args, detector=None):
         super().__init__(92, original.matcher, dict(original.weight_dict), original.losses,
                          original.focal_alpha)
         self.method = args.paper_baseline
@@ -97,7 +109,8 @@ class PaperCriterion(SetCriterion):
         self.epoch = 0
         self.warmup = args.ow_pseudo_warmup
         self.top_k = args.ow_top_unknown
-        if self.method == 'ow-detr':
+        self.cat_adaptive = getattr(detector, 'cat_adaptive', None)
+        if self.method in ('ow-detr', 'cat'):
             self.weight_dict['loss_NC'] = 0.1
             for layer in range(args.dec_layers - 1):
                 self.weight_dict[f'loss_NC_{layer}'] = 0.1
@@ -108,13 +121,14 @@ class PaperCriterion(SetCriterion):
             mask = torch.zeros_like(target['labels'], dtype=torch.bool)
             for category in self.known_ids:
                 mask |= target['labels'] == category
-            filtered.append({**target, 'labels': target['labels'][mask], 'boxes': target['boxes'][mask]})
+            filtered.append({**target, 'labels': target['labels'][mask],
+                             'boxes': target['boxes'][mask]})
         return filtered
 
     def forward(self, outputs, targets):
         # Full validation labels remain available to the evaluator, never matcher/loss.
         targets = self.known_targets(targets)
-        if self.method != 'ow-detr':
+        if self.method == 'ew-detr':
             return super().forward(outputs, targets)
         count = outputs['pred_logits'].new_tensor([sum(len(t['labels']) for t in targets)])
         if is_dist_avail_and_initialized():
@@ -126,8 +140,16 @@ class PaperCriterion(SetCriterion):
             classification_targets = copy.deepcopy(targets)
             classification_indices = matched
             if self.epoch >= self.warmup:
-                selected = attention_pseudo_queries(outputs['attention_feature'], layer['pred_boxes'],
-                                                    matched, outputs['padded_size'], self.top_k)
+                if self.method == 'cat':
+                    selected = cat_pseudo_queries(
+                        outputs['attention_feature'], layer['pred_boxes'], matched,
+                        [target['proposal_boxes'] for target in targets],
+                        outputs['padded_size'], self.cat_adaptive.model_weight,
+                        self.cat_adaptive.input_weight, self.top_k)
+                else:
+                    selected = attention_pseudo_queries(
+                        outputs['attention_feature'], layer['pred_boxes'], matched,
+                        outputs['padded_size'], self.top_k)
                 classification_indices = []
                 for target, (src, dst), queries in zip(classification_targets, matched, selected):
                     offset = len(target['labels'])
@@ -142,14 +164,24 @@ class PaperCriterion(SetCriterion):
                                                         alpha=self.focal_alpha, gamma=2) * foreground.shape[1]
             suffix = '' if index == 0 else f'_{index - 1}'
             losses.update({key + suffix: value for key, value in layer_losses.items()})
+        if self.method == 'cat':
+            controller_loss = sum(
+                losses[name] * self.weight_dict[name]
+                for name in ('loss_ce', 'loss_bbox', 'loss_giou', 'loss_NC'))
+            if is_dist_avail_and_initialized():
+                controller_loss = controller_loss.detach().clone()
+                torch.distributed.all_reduce(controller_loss)
+                controller_loss /= get_world_size()
+            self.cat_adaptive.observe(controller_loss)
         return losses
 
 
 class PaperPostProcess(nn.Module):
-    def __init__(self, known_ids, threshold):
+    def __init__(self, known_ids, threshold, max_detections=100):
         super().__init__()
         self.known_ids = list(known_ids)
         self.threshold = threshold
+        self.max_detections = max_detections
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -157,7 +189,8 @@ class PaperPostProcess(nn.Module):
         # Sparse COCO slots stay intact; 91 is a dedicated unknown category.
         categories = torch.tensor(self.known_ids + [91], device=logits.device)
         probabilities = logits[..., categories].sigmoid()
-        scores, indices = probabilities.flatten(1).topk(min(100, probabilities[0].numel()), dim=1)
+        scores, indices = probabilities.flatten(1).topk(
+            min(self.max_detections, probabilities[0].numel()), dim=1)
         queries = indices // len(categories)
         labels = categories[indices % len(categories)]
         boxes = box_ops.box_cxcywh_to_xyxy(outputs['pred_boxes'])
@@ -179,7 +212,10 @@ def build(args):
         raise ValueError('Paper baselines require the isolated frozen-backbone, one-stage detector configuration')
     if args.num_classes != 92 or not args.owod_known_class_ids:
         raise ValueError('Expected sparse COCO labels with 92 slots (unknown=91)')
+    if args.paper_baseline == 'cat' and not args.cat_proposals:
+        raise ValueError('CAT requires --cat-proposals generated by prepare_cat_proposals.py')
     detector, criterion, _ = build_base(args)
     model = PaperDetector(detector, args)
-    return model, PaperCriterion(criterion, args), {
-        'bbox': PaperPostProcess(args.owod_known_class_ids, args.unknown_threshold)}
+    return model, PaperCriterion(criterion, args, model), {
+        'bbox': PaperPostProcess(args.owod_known_class_ids, args.unknown_threshold,
+                                 max_detections=50 if args.paper_baseline == 'cat' else 100)}
