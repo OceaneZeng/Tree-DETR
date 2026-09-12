@@ -458,7 +458,7 @@ def main(argv=None):
                         command.extend(['--resume', str(directory / 'checkpoint.pth')])
                     write_json(args.output_dir / 'queue_status.json', {'status': 'running', 'run': key, 'pid': os.getpid()})
                     print(f'Starting {key}; log: {directory / "console.log"}', flush=True)
-                    run_child(command, directory / 'console.log', environment)
+                    run_child(command, directory / 'train.log', environment)
                     if not baseline_complete(directory, run['epochs'], method):
                         raise RuntimeError(f'{key} exited without valid completion artifacts')
                     verify_checkpoint(directory, run['epochs'], method, stage, environment)

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import sqlite3
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,7 +25,8 @@ from tools.owod.run_paper_baselines import (
 from tools.owod.run_stage1_diagnostics import training_environment
 
 
-METHODS = ("cat", "ew-detr")
+METHODS = ("ow-detr", "prob", "owobj", "cat", "ew-detr")
+DEFAULT_METHODS = ("ow-detr", "prob", "owobj", "cat")
 DEFAULT_MANIFEST = ROOT / "data/coco-owod/m-owodb/split_manifest.json"
 DEFAULT_COCO = ROOT / "data/coco"
 DEFAULT_PROPOSALS = ROOT / "data/derived/m-owodb-cat/selective_search.sqlite3"
@@ -47,6 +49,23 @@ def selected_methods(values):
 
 def state_directory(output_dir, methods):
     return output_dir if len(methods) > 1 else output_dir / methods[0]
+
+
+def validate_cuda_runtime(environment):
+    """Fail before the queue if the active torch build cannot run the GPUs."""
+    probe = (
+        "import torch; "
+        "assert torch.cuda.is_available(), 'CUDA is unavailable'; "
+        "arch=set(torch.cuda.get_arch_list()); "
+        "caps=[torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())]; "
+        "missing=[(i, f'sm_{m}{n}') for i,(m,n) in enumerate(caps) if arch and f'sm_{m}{n}' not in arch]; "
+        "raise SystemExit('unsupported GPU architectures: ' + repr(missing) + '; torch=' + torch.__version__) if missing else None"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], env=environment,
+                            text=True, capture_output=True)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else "CUDA runtime preflight failed")
 
 
 def create_plan(args):
@@ -122,7 +141,7 @@ def create_plan(args):
         for method in methods_to_run:
             directory = args.output_dir / method / f"stage_{stage}"
             annotation = directory / "train.json"
-            payload = (cat_train if method == "cat" else annotation_subset(
+            payload = (cat_train if method in ("ow-detr", "cat", "prob", "owobj") else annotation_subset(
                 increment, [image["id"] for image in increment["images"]],
                 current_classes))
             epochs = args.stage0_epochs if stage == 0 else args.incremental_epochs
@@ -167,12 +186,23 @@ def create_plan(args):
                 ])
                 if stage:
                     command.extend(["--replay-sampling-fraction", str(args.replay_fraction)])
-            else:
+            elif method == "ew-detr":
                 command.extend([
                     "--ew-rank", str(args.ew_rank),
                     "--ew-current-samples", str(len(increment["images"])),
                     "--ew-previous-samples", str(previous_samples),
                 ])
+            elif method in ("prob", "owobj"):
+                command.extend([
+                    "--prob-objectness-coef", str(args.prob_objectness_coef),
+                    "--prob-objectness-temperature", str(args.prob_objectness_temperature),
+                    "--owobj-sketch-sigma", str(args.owobj_sketch_sigma),
+                    "--owobj-energy-coef", str(args.owobj_energy_coef),
+                ])
+                if stage:
+                    command.extend(["--replay-sampling-fraction", str(args.replay_fraction)])
+            if method == "ow-detr" and stage:
+                command.extend(["--replay-sampling-fraction", str(args.replay_fraction)])
             runs[f"{method}/stage_{stage}"] = {
                 "command": command,
                 "annotation": payload,
@@ -226,7 +256,7 @@ def main(argv=None):
     parser.add_argument("--coco-path", type=Path, default=DEFAULT_COCO)
     parser.add_argument("--cat-proposals", type=Path, default=DEFAULT_PROPOSALS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
+    parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(DEFAULT_METHODS))
     parser.add_argument("--gpus", default="0,1")
     parser.add_argument("--master-port", type=int, default=29579)
     parser.add_argument("--memory-images", type=int, default=400)
@@ -254,6 +284,10 @@ def main(argv=None):
     parser.add_argument("--cat-update-interval", type=int, default=100)
     parser.add_argument("--cat-positive-momentum", type=float, default=0.01)
     parser.add_argument("--cat-negative-momentum", type=float, default=0.01)
+    parser.add_argument("--prob-objectness-coef", type=float, default=8e-4)
+    parser.add_argument("--prob-objectness-temperature", type=float, default=1.3)
+    parser.add_argument("--owobj-sketch-sigma", type=float, default=1.0)
+    parser.add_argument("--owobj-energy-coef", type=float, default=0.1)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--summarize", action="store_true")
@@ -287,6 +321,7 @@ def main(argv=None):
         print("Dry run passed. No output files or checkpoints were created.")
         return 0
     environment = training_environment(args.gpus)
+    validate_cuda_runtime(environment)
     with queue_lock(state_dir):
         if plan_path.is_file() and read_json(plan_path) != plan:
             raise ValueError("Existing plan differs; choose a new output directory")
@@ -314,7 +349,10 @@ def main(argv=None):
                         command.extend(["--resume", str(directory / "checkpoint.pth")])
                     write_json(state_dir / "reimplementation_queue_status.json",
                                {"status": "running", "run": key, "pid": os.getpid()})
-                    run_child(command, directory / "console.log", environment)
+                    # Keep the same per-stage human log name as the existing
+                    # Tree-DETR experiments.  The child command disables its
+                    # own tee, so this file is the single authoritative log.
+                    run_child(command, directory / "train.log", environment)
                     if not baseline_complete(directory, run["epochs"], method):
                         raise RuntimeError(f"{key} ended without complete artifacts")
                     verify_checkpoint(directory, run["epochs"], method, stage, environment)

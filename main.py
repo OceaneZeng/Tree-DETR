@@ -68,7 +68,7 @@ def get_args_parser():
     parser.add_argument('--two_stage', default=False, action='store_true')
     parser.add_argument('--with_tree', action='store_true',
                         help='Enable the experimental Tree-DETR EE-0 flat-tree losses and adapters')
-    parser.add_argument('--paper-baseline', choices=('ow-detr', 'cat', 'ew-detr'), default=None)
+    parser.add_argument('--paper-baseline', choices=('ow-detr', 'prob', 'owobj', 'cat', 'ew-detr'), default=None)
     parser.add_argument('--ow-pseudo-warmup', type=int, default=9)
     parser.add_argument('--ow-top-unknown', type=int, default=5)
     parser.add_argument('--ew-rank', type=int, default=16)
@@ -82,6 +82,14 @@ def get_args_parser():
     parser.add_argument('--cat-update-interval', type=int, default=100)
     parser.add_argument('--cat-positive-momentum', type=float, default=0.01)
     parser.add_argument('--cat-negative-momentum', type=float, default=0.01)
+    parser.add_argument('--prob-objectness-coef', type=float, default=8e-4,
+                        help='PROB/OWOBJ objectness likelihood loss coefficient')
+    parser.add_argument('--prob-objectness-temperature', type=float, default=1.3,
+                        help='Temperature used to convert PROB energy into detection confidence')
+    parser.add_argument('--owobj-sketch-sigma', type=float, default=1.0,
+                        help='Gaussian sketch noise used by the local OWOBJ port')
+    parser.add_argument('--owobj-energy-coef', type=float, default=0.1,
+                        help='OWOBJ energy-margin loss coefficient')
 
     parser.add_argument('--owod-manifest', default='',
                         help='S-OWODB/M-OWODB split manifest used for this run')

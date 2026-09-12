@@ -17,6 +17,7 @@ from util import box_ops
 from util.misc import get_world_size, is_dist_avail_and_initialized
 from .cat_modules import AdaptivePseudoLabeler, cat_pseudo_queries
 from .ew_modules import DualLoRA, QueryNormEUMix, inject_dual_lora, merge_beta
+from .objectness import ProbObjectnessHead, SketchObjectnessHead
 
 
 class PaperDetector(nn.Module):
@@ -27,9 +28,10 @@ class PaperDetector(nn.Module):
         self.known_ids = list(args.owod_known_class_ids)
         self.unknown_id = 91
         detector.return_baseline_features = True
-        if self.method in ('ow-detr', 'cat'):
-            self.objectness = nn.Linear(args.hidden_dim, 1)
-            nn.init.constant_(self.objectness.bias, -math.log(99))
+        if self.method in ('ow-detr', 'cat', 'prob', 'owobj'):
+            if self.method in ('ow-detr', 'cat'):
+                self.objectness = nn.Linear(args.hidden_dim, 1)
+                nn.init.constant_(self.objectness.bias, -math.log(99))
             if self.method == 'cat':
                 detector.cascade_decoder = True
                 self.cat_adaptive = AdaptivePseudoLabeler(
@@ -39,6 +41,13 @@ class PaperDetector(nn.Module):
                     update_interval=args.cat_update_interval,
                     positive_momentum=args.cat_positive_momentum,
                     negative_momentum=args.cat_negative_momentum)
+            elif self.method == 'prob':
+                self.prob_objectness = nn.ModuleList(
+                    [ProbObjectnessHead(args.hidden_dim) for _ in range(args.dec_layers)])
+            elif self.method == 'owobj':
+                self.prob_objectness = nn.ModuleList(
+                    [SketchObjectnessHead(args.hidden_dim, args.owobj_sketch_sigma)
+                     for _ in range(args.dec_layers)])
         else:
             self.adapter_layers = inject_dual_lora(detector, args.ew_rank)
             self.calibration = QueryNormEUMix(args.hidden_dim, self.known_ids)
@@ -49,13 +58,20 @@ class PaperDetector(nn.Module):
         layers = [*output.get('aux_outputs', []), output]
         layer_features = features if len(layers) > 1 else features[-1:]
         heads = self.detr.class_embed if len(layers) > 1 else self.detr.class_embed[-1:]
-        for layer, hidden, head in zip(layers, layer_features, heads):
-            if self.method in ('ow-detr', 'cat'):
+        for index, (layer, hidden, head) in enumerate(zip(layers, layer_features, heads)):
+            if self.method in ('ow-detr', 'cat', 'prob', 'owobj'):
                 logits = head(hidden) if self.method == 'cat' else layer['pred_logits']
                 mask = torch.ones(logits.shape[-1], dtype=torch.bool, device=logits.device)
                 mask[self.known_ids + [self.unknown_id]] = False
                 layer['pred_logits'] = logits.masked_fill(mask, -1e8)
-                layer['pred_objectness'] = self.objectness(hidden)
+                if self.method in ('ow-detr', 'cat'):
+                    layer['pred_objectness'] = self.objectness(hidden)
+                elif self.method == 'prob':
+                    layer['pred_obj'] = self.prob_objectness[index](hidden)
+                else:
+                    clean, sketch = self.prob_objectness[index](hidden)
+                    layer['pred_obj'] = clean
+                    layer['pred_obj_sketch'] = sketch
             else:
                 layer['pred_logits'] = self.calibration(hidden, head)
         if self.method == 'cat':
@@ -114,6 +130,14 @@ class PaperCriterion(SetCriterion):
             self.weight_dict['loss_NC'] = 0.1
             for layer in range(args.dec_layers - 1):
                 self.weight_dict[f'loss_NC_{layer}'] = 0.1
+        if self.method in ('prob', 'owobj'):
+            self.weight_dict['loss_obj_ll'] = args.prob_objectness_coef
+            for layer in range(args.dec_layers - 1):
+                self.weight_dict[f'loss_obj_ll_{layer}'] = args.prob_objectness_coef
+        if self.method == 'owobj':
+            self.weight_dict['loss_energy'] = args.owobj_energy_coef
+            for layer in range(args.dec_layers - 1):
+                self.weight_dict[f'loss_energy_{layer}'] = args.owobj_energy_coef
 
     def known_targets(self, targets):
         filtered = []
@@ -128,8 +152,32 @@ class PaperCriterion(SetCriterion):
     def forward(self, outputs, targets):
         # Full validation labels remain available to the evaluator, never matcher/loss.
         targets = self.known_targets(targets)
-        if self.method == 'ew-detr':
-            return super().forward(outputs, targets)
+        if self.method in ('ew-detr', 'prob', 'owobj'):
+            losses = super().forward(outputs, targets)
+            if self.method in ('prob', 'owobj'):
+                count = outputs['pred_logits'].new_tensor(
+                    [sum(len(t['labels']) for t in targets)])
+                if is_dist_avail_and_initialized():
+                    torch.distributed.all_reduce(count)
+                count = (count / get_world_size()).clamp(min=1).item()
+                for index, layer in enumerate([outputs, *outputs.get('aux_outputs', [])]):
+                    matched = self.matcher(layer, targets)
+                    indices = self._get_src_permutation_idx(matched)
+                    energy = layer['pred_obj'][indices]
+                    suffix = '' if index == 0 else f'_{index - 1}'
+                    losses[f'loss_obj_ll{suffix}'] = energy.clamp_min(
+                        -256 * math.log(0.9)).sum() / count
+                    if self.method == 'owobj':
+                        sketch = layer['pred_obj_sketch'][indices]
+                        losses[f'loss_energy{suffix}'] = (
+                            sketch - energy).abs().mean()
+                        known = layer['pred_logits'][..., self.known_ids]
+                        unknown = layer['pred_logits'][..., 91]
+                        e_in = -torch.logsumexp(known, dim=-1)
+                        e_out = -unknown
+                        losses[f'loss_energy{suffix}'] = losses[f'loss_energy{suffix}'] + F.relu(
+                            e_out - e_in + 0.2).mean()
+            return losses
         count = outputs['pred_logits'].new_tensor([sum(len(t['labels']) for t in targets)])
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(count)
@@ -202,6 +250,48 @@ class PaperPostProcess(nn.Module):
                 for s, l, b, u in zip(scores, labels, boxes, unknown)]
 
 
+class EnergyPostProcess(nn.Module):
+    """Convert PROB/OWOBJ energies to the evaluator's common result schema."""
+
+    def __init__(self, known_ids, threshold, temperature=1.3, max_detections=100,
+                 multiply_objectness=True):
+        super().__init__()
+        self.known_ids = list(known_ids)
+        self.threshold = float(threshold)
+        self.temperature = float(temperature)
+        self.max_detections = int(max_detections)
+        self.multiply_objectness = bool(multiply_objectness)
+
+    @torch.no_grad()
+    def forward(self, outputs, target_sizes):
+        logits = outputs['pred_logits']
+        energies = outputs['pred_obj']
+        categories = torch.tensor(self.known_ids, device=logits.device)
+        known_prob = logits[..., categories].sigmoid()
+        if self.multiply_objectness:
+            object_prob = torch.exp(-self.temperature * energies).unsqueeze(-1)
+            scores_by_class = known_prob * object_prob
+        else:
+            scores_by_class = known_prob
+        flat = scores_by_class.flatten(1)
+        count = min(self.max_detections, flat.shape[1])
+        scores, flat_indices = flat.topk(count, dim=1)
+        queries = flat_indices // len(categories)
+        labels = categories[flat_indices % len(categories)]
+        boxes = box_ops.box_cxcywh_to_xyxy(outputs['pred_boxes'])
+        boxes = boxes.gather(1, queries[..., None].expand(-1, -1, 4))
+        height, width = target_sizes.unbind(1)
+        boxes *= torch.stack([width, height, width, height], -1)[:, None]
+        max_known = known_prob.amax(-1)
+        # Energy is a background score; combine it with the classifier gap so
+        # known high-confidence detections are not counted as unknowns.
+        energy_unknown = 1.0 - torch.exp(-self.temperature * energies).clamp(0, 1)
+        unknown = (energy_unknown * (1.0 - max_known)).gather(1, queries)
+        return [dict(scores=s, labels=l, boxes=b, unknown_scores=u,
+                     unknown_mask=u >= self.threshold)
+                for s, l, b, u in zip(scores, labels, boxes, unknown)]
+
+
 def build(args):
     if args.paper_baseline == 'ew-detr' and args.replay_sampling_fraction:
         raise ValueError('EW-DETR is exemplar-free; replay is not allowed')
@@ -216,6 +306,14 @@ def build(args):
         raise ValueError('CAT requires --cat-proposals generated by prepare_cat_proposals.py')
     detector, criterion, _ = build_base(args)
     model = PaperDetector(detector, args)
-    return model, PaperCriterion(criterion, args, model), {
-        'bbox': PaperPostProcess(args.owod_known_class_ids, args.unknown_threshold,
-                                 max_detections=50 if args.paper_baseline == 'cat' else 100)}
+    if args.paper_baseline in ('prob', 'owobj'):
+        postprocessor = EnergyPostProcess(
+            args.owod_known_class_ids, args.unknown_threshold,
+            # The paper scales temperature by the decoder feature dimension.
+            temperature=args.prob_objectness_temperature / args.hidden_dim,
+            multiply_objectness=args.paper_baseline == 'prob')
+    else:
+        postprocessor = PaperPostProcess(
+            args.owod_known_class_ids, args.unknown_threshold,
+            max_detections=50 if args.paper_baseline == 'cat' else 100)
+    return model, PaperCriterion(criterion, args, model), {'bbox': postprocessor}
