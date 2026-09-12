@@ -17,8 +17,10 @@ manifest may be used for a consistency run with `--allow-unverified`:
 cd /home/top/disks/new-hdd/zhy/Tree-DETR
 source /home/top/miniconda3/etc/profile.d/conda.sh
 conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
+mkdir -p "$PWD/exps/owod/m-owodb/order0/pilot_unverified/internal_baselines"
 
-CUDA_VISIBLE_DEVICES=0,1 python -u tools/owod/run_mowodb_reimplementations.py \
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1 \
+python -u tools/owod/run_mowodb_reimplementations.py \
   --methods ow-detr prob owobj cat \
   --manifest "$PWD/data/coco-owod/m-owodb/order0/split_manifest.json" \
   --coco-path "$PWD/data/coco" \

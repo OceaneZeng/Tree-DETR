@@ -13,18 +13,10 @@ import sys
 from typing import Mapping
 
 import numpy as np
-import torch
-from scipy.optimize import linear_sum_assignment
-from torch.utils.data import DataLoader, SequentialSampler
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from datasets import build_dataset
-from main import get_args_parser, load_local_checkpoint
-from models import build_model
-from util import box_ops
-from util.misc import collate_fn
 
 
 GROUP_ORDER = ("Previous", "Current", "Unknown", "Background")
@@ -58,10 +50,23 @@ def parse_args(argv=None):
     parser.add_argument("--background-iou", type=float, default=0.1)
     parser.add_argument("--background-per-image", type=int, default=2)
     parser.add_argument("--max-per-class", type=int, default=100)
+    parser.add_argument("--class-confidence", type=float, default=0.3,
+                        help="Class plot only: require correct known-class prediction and this confidence")
     parser.add_argument("--max-per-group", type=int, default=1000)
     parser.add_argument("--perplexity", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not 0 <= args.class_confidence <= 1:
+        parser.error("--class-confidence must lie in [0, 1]")
+    if not 0 <= args.background_iou < args.iou_threshold <= 1:
+        parser.error("Require 0 <= background-iou < iou-threshold <= 1")
+    if min(args.batch_size, args.max_per_class, args.max_per_group) <= 0:
+        parser.error("Batch size and sampling limits must be positive")
+    if min(args.max_images, args.num_workers, args.background_per_image) < 0:
+        parser.error("Image/worker/background counts cannot be negative")
+    if args.perplexity <= 0:
+        parser.error("--perplexity must be positive")
+    return args
 
 
 def read_json(path: Path) -> dict:
@@ -69,6 +74,7 @@ def read_json(path: Path) -> dict:
 
 
 def detector_args_from_config(config: Mapping, cli_args):
+    from main import get_args_parser
     detector_args = get_args_parser().parse_args([])
     for name, value in config.items():
         if hasattr(detector_args, name):
@@ -89,6 +95,8 @@ def detector_args_from_config(config: Mapping, cli_args):
 
 
 def load_d2_model(detector_args, checkpoint_path: Path, device: torch.device):
+    from main import load_local_checkpoint
+    from models import build_model
     model, _criterion, _postprocessors = build_model(detector_args)
     payload = load_local_checkpoint(checkpoint_path)
     state = payload.get("model", payload) if isinstance(payload, Mapping) else payload
@@ -114,12 +122,18 @@ def category_group(class_id: int, previous_ids: set[int], current_ids: set[int])
     return "Unknown"
 
 
-def match_image(features, pred_boxes, target, previous_ids, current_ids,
+def match_image(features, pred_boxes, pred_logits, target, previous_ids, current_ids,
                 iou_threshold, background_iou, background_per_image, rng):
+    from scipy.optimize import linear_sum_assignment
+    from util import box_ops
+
     gt_boxes = target["boxes"].detach().cpu()
     gt_labels = target["labels"].detach().cpu()
     pred_boxes = pred_boxes.detach().cpu()
     image_id = int(target["image_id"].item())
+    # Match the actual unmasked D2 classifier, including sparse COCO slots.
+    # Restricting argmax to GT/known IDs would hide some classification errors.
+    scores, predictions = pred_logits.detach().cpu().sigmoid().max(dim=-1)
     records = []
 
     if len(gt_boxes):
@@ -135,35 +149,41 @@ def match_image(features, pred_boxes, target, previous_ids, current_ids,
             class_id = int(gt_labels[gt_index])
             matched_queries.add(query_index)
             records.append({
-                "feature": features[query_index].numpy(),
+                "feature": features[query_index].numpy().copy(),
                 "group": category_group(class_id, previous_ids, current_ids),
                 "class_id": class_id,
                 "image_id": image_id,
                 "query_id": query_index,
                 "iou": overlap,
+                "predicted_class_id": int(predictions[query_index]),
+                "confidence": float(scores[query_index]),
             })
         max_iou = ious.max(dim=0).values.numpy()
         candidates = [index for index, value in enumerate(max_iou)
                       if index not in matched_queries and value < background_iou]
     else:
         candidates = list(range(len(pred_boxes)))
+        max_iou = np.zeros(len(pred_boxes))
 
     if background_per_image > 0 and candidates:
         chosen = rng.sample(candidates, min(background_per_image, len(candidates)))
         for query_index in chosen:
             records.append({
-                "feature": features[query_index].numpy(),
+                "feature": features[query_index].numpy().copy(),
                 "group": "Background",
                 "class_id": -1,
                 "image_id": image_id,
                 "query_id": query_index,
-                "iou": 0.0,
+                "iou": float(max_iou[query_index]),
+                "predicted_class_id": int(predictions[query_index]),
+                "confidence": float(scores[query_index]),
             })
     return records
 
 
-@torch.inference_mode()
 def extract_features(model, dataset, device, args, previous_ids, current_ids):
+    from torch.utils.data import DataLoader, SequentialSampler
+    from util.misc import collate_fn
     loader = DataLoader(
         dataset, batch_size=args.batch_size, sampler=SequentialSampler(dataset),
         drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers,
@@ -178,11 +198,12 @@ def extract_features(model, dataset, device, args, previous_ids, current_ids):
         outputs = model(samples)
         layer_features = outputs["decoder_features"][-1].detach().cpu()
         pred_boxes = outputs["pred_boxes"].detach().cpu()
+        pred_logits = outputs["pred_logits"].detach().cpu()
         for batch_index, target in enumerate(targets):
             if args.max_images and processed >= args.max_images:
                 break
             records.extend(match_image(
-                layer_features[batch_index], pred_boxes[batch_index], target,
+                layer_features[batch_index], pred_boxes[batch_index], pred_logits[batch_index], target,
                 previous_ids, current_ids, args.iou_threshold,
                 args.background_iou, args.background_per_image, rng))
             processed += 1
