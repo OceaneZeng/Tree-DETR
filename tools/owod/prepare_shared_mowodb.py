@@ -152,6 +152,9 @@ def write_shared_configs(repo: Path, method: str) -> list[Path]:
         if not source.is_file():
             raise FileNotFoundError(f"Missing baseline config: {source}")
         content = source.read_text(encoding="utf-8")
+        # Stop the four-stage recipe at the first failed subprocess; otherwise
+        # later stages produce misleading missing-checkpoint errors.
+        content = content.replace("set -x", "set -e\nset -x", 1)
         original_output = {
             "prob": "EXP_DIR=exps/MOWODB/PROB",
             "owobj": "EXP_DIR=exps/MOWODB/OWOBJ",
