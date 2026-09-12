@@ -59,7 +59,8 @@ def validate_cuda_runtime(environment):
         "arch=set(torch.cuda.get_arch_list()); "
         "caps=[torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())]; "
         "missing=[(i, f'sm_{m}{n}') for i,(m,n) in enumerate(caps) if arch and f'sm_{m}{n}' not in arch]; "
-        "raise SystemExit('unsupported GPU architectures: ' + repr(missing) + '; torch=' + torch.__version__) if missing else None"
+        "\nif missing:\n"
+        "    raise SystemExit('unsupported GPU architectures: ' + repr(missing) + '; torch=' + torch.__version__)\n"
     )
     result = subprocess.run([sys.executable, "-c", probe], env=environment,
                             text=True, capture_output=True)

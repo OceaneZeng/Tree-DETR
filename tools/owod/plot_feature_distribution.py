@@ -228,11 +228,35 @@ def balanced_indices(records, max_per_class: int, max_background: int, seed: int
 
 def group_balanced_indices(groups, max_per_group: int, seed: int):
     rng = random.Random(seed)
+    counts = [int(np.sum(groups == group)) for group in GROUP_ORDER]
+    limit = min([max_per_group] + [count for count in counts if count])
     selected = []
     for group in GROUP_ORDER:
         indices = np.flatnonzero(groups == group).tolist()
-        selected.extend(rng.sample(indices, min(max_per_group, len(indices))))
+        selected.extend(rng.sample(indices, min(limit, len(indices))))
     return sorted(selected)
+
+
+def select_class_records(records, known_ids, confidence, max_per_class, seed):
+    buckets = {class_id: [] for class_id in sorted(known_ids)}
+    before = dict.fromkeys(buckets, 0)
+    for record in records:
+        class_id = record['class_id']
+        if class_id not in buckets:
+            continue
+        before[class_id] += 1
+        if (record['predicted_class_id'] == class_id
+                and record['confidence'] >= confidence):
+            buckets[class_id].append(record)
+    available = [len(items) for items in buckets.values() if items]
+    count = min([max_per_class] + available) if available else 0
+    rng = random.Random(seed)
+    selected = [record for items in buckets.values()
+                for record in rng.sample(items, min(count, len(items)))]
+    audit = {str(class_id): {'matched': before[class_id], 'eligible': len(items),
+                            'plotted': min(count, len(items))}
+             for class_id, items in buckets.items()}
+    return selected, audit
 
 
 def tsne_embedding(features: np.ndarray, perplexity: float, seed: int) -> np.ndarray:
@@ -277,8 +301,8 @@ def configure_matplotlib():
 def save_group_plot(embedding, groups, output_dir, max_per_group, seed):
     plt = configure_matplotlib()
     indices = group_balanced_indices(groups, max_per_group=max_per_group, seed=seed)
-    figure, axis = plt.subplots(figsize=(6.6, 5.2))
-    for group in GROUP_ORDER:
+    figure, axis = plt.subplots(figsize=(7.6, 5.2))
+    for group in ("Background", "Unknown", "Previous", "Current"):
         mask = np.array([index for index in indices if groups[index] == group])
         if not len(mask):
             continue
@@ -288,7 +312,10 @@ def save_group_plot(embedding, groups, output_dir, max_per_group, seed):
                      label=group, rasterized=True)
     axis.set_xlabel("t-SNE dimension 1")
     axis.set_ylabel("t-SNE dimension 2")
-    axis.legend(frameon=False, markerscale=1.5)
+    handles, labels = axis.get_legend_handles_labels()
+    order = sorted(range(len(labels)), key=lambda i: GROUP_ORDER.index(labels[i]))
+    axis.legend([handles[i] for i in order], [labels[i] for i in order],
+                frameon=False, markerscale=1.5, loc='upper left', bbox_to_anchor=(1.02, 1))
     figure.tight_layout()
     figure.savefig(output_dir / "d2_group_distribution.pdf", bbox_inches="tight")
     figure.savefig(output_dir / "d2_group_distribution.png", dpi=600, bbox_inches="tight")
@@ -297,45 +324,76 @@ def save_group_plot(embedding, groups, output_dir, max_per_group, seed):
 
 def save_class_plot(embedding, groups, class_ids, category_names, output_dir):
     plt = configure_matplotlib()
-    figure, axes = plt.subplots(1, 2, figsize=(13.2, 5.2), sharex=True, sharey=True)
+    figure = plt.figure(figsize=(14.8, 5.5), layout='constrained')
+    grid = figure.add_gridspec(1, 4, width_ratios=(4.4, 1.5, 4.4, 1.5), wspace=0.06)
+    axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 2])]
+    legend_axes = [figure.add_subplot(grid[0, 1]), figure.add_subplot(grid[0, 3])]
     color_map = plt.get_cmap("tab20")
-    for axis, group, title, marker in zip(
-            axes, ("Previous", "Current"), ("Task 1: previous classes", "Task 2: current classes"),
+    lower, upper = embedding.min(axis=0), embedding.max(axis=0)
+    padding = np.maximum((upper - lower) * 0.06, 1)
+    for axis, legend_axis, group, title, marker in zip(
+            axes, legend_axes, ("Previous", "Current"), ("(a) Previous classes", "(b) Current classes"),
             ("o", "s")):
         ids = sorted(set(class_ids[groups == group].tolist()))
         for color_index, class_id in enumerate(ids):
             mask = (groups == group) & (class_ids == class_id)
             axis.scatter(embedding[mask, 0], embedding[mask, 1], s=12,
                          color=color_map(color_index % 20), marker=marker,
-                         alpha=0.72, linewidths=0, rasterized=True,
+                         alpha=0.85, linewidths=0, rasterized=True,
                          label=category_names.get(class_id, str(class_id)))
         axis.set_title(title)
         axis.set_xlabel("t-SNE dimension 1")
-        axis.legend(frameon=False, fontsize=7, ncol=2, markerscale=1.2,
-                    loc="upper center", bbox_to_anchor=(0.5, -0.14))
+        axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
+        axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
+        axis.set_box_aspect(1)
+        axis.set_xticks([])
+        axis.set_yticks([])
+        legend_axis.axis('off')
+        handles, labels = axis.get_legend_handles_labels()
+        legend_axis.legend(handles, labels, frameon=False, fontsize=8,
+                           markerscale=1.5, loc='center left', borderaxespad=0,
+                           handletextpad=0.4, labelspacing=0.7)
     axes[0].set_ylabel("t-SNE dimension 2")
-    figure.tight_layout()
     figure.savefig(output_dir / "d2_class_distribution.pdf", bbox_inches="tight")
     figure.savefig(output_dir / "d2_class_distribution.png", dpi=600, bbox_inches="tight")
     plt.close(figure)
 
 
-def save_data(output_dir, features, embedding, groups, class_ids, image_ids, query_ids, ious):
+def save_data(output_dir, features, embedding, groups, class_ids, image_ids, query_ids, ious,
+              predicted_class_ids, confidences, stem='features'):
     np.savez_compressed(
-        output_dir / "features.npz", features=features, embedding=embedding,
+        output_dir / f"{stem}.npz", features=features, embedding=embedding,
         groups=groups, class_ids=class_ids, image_ids=image_ids,
-        query_ids=query_ids, ious=ious)
-    with (output_dir / "embedding.csv").open("w", newline="", encoding="utf-8") as handle:
+        query_ids=query_ids, ious=ious, predicted_class_ids=predicted_class_ids,
+        confidences=confidences)
+    with (output_dir / f"{stem}_embedding.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(("x", "y", "group", "class_id", "image_id", "query_id", "iou"))
-        for point, group, class_id, image_id, query_id, overlap in zip(
-                embedding, groups, class_ids, image_ids, query_ids, ious):
+        writer.writerow(("x", "y", "group", "class_id", "image_id", "query_id", "iou",
+                         "predicted_class_id", "confidence"))
+        for point, group, class_id, image_id, query_id, overlap, predicted, confidence in zip(
+                embedding, groups, class_ids, image_ids, query_ids, ious, predicted_class_ids, confidences):
             writer.writerow((float(point[0]), float(point[1]), group, int(class_id),
-                             int(image_id), int(query_id), float(overlap)))
+                             int(image_id), int(query_id), float(overlap), int(predicted), float(confidence)))
+
+
+def project_records(records, output_dir, args, stem):
+    features = np.stack([r['feature'] for r in records]).astype(np.float32)
+    embedding = tsne_embedding(features, args.perplexity, args.seed)
+    groups = np.asarray([r['group'] for r in records])
+    class_ids = np.asarray([r['class_id'] for r in records])
+    save_data(output_dir, features, embedding, groups, class_ids,
+              np.asarray([r['image_id'] for r in records]),
+              np.asarray([r['query_id'] for r in records]),
+              np.asarray([r['iou'] for r in records]),
+              np.asarray([r['predicted_class_id'] for r in records]),
+              np.asarray([r['confidence'] for r in records]), stem)
+    return embedding, groups, class_ids
 
 
 def main(argv=None):
     args = parse_args(argv)
+    import torch
+    from datasets import build_dataset
     run_dir = args.run_dir.resolve()
     config_path = (args.config or run_dir / "run_config.json").resolve()
     checkpoint_path = (args.checkpoint or run_dir / "checkpoint.pth").resolve()
@@ -360,33 +418,43 @@ def main(argv=None):
     detector_args = detector_args_from_config(config, args)
     model = load_d2_model(detector_args, checkpoint_path, device)
     dataset = build_dataset("val", detector_args)
-    records = extract_features(model, dataset, device, args, previous_ids, current_ids)
+    with torch.inference_mode():
+        records = extract_features(model, dataset, device, args, previous_ids, current_ids)
     if not records:
         raise RuntimeError("No query features passed the matching thresholds")
-
-    selected = balanced_indices(records, args.max_per_class, args.max_per_group, args.seed)
-    records = [records[index] for index in selected]
-    features = np.stack([record["feature"] for record in records]).astype(np.float32)
-    groups = np.asarray([record["group"] for record in records])
-    class_ids = np.asarray([record["class_id"] for record in records], dtype=np.int64)
-    image_ids = np.asarray([record["image_id"] for record in records], dtype=np.int64)
-    query_ids = np.asarray([record["query_id"] for record in records], dtype=np.int64)
-    ious = np.asarray([record["iou"] for record in records], dtype=np.float32)
-    embedding = tsne_embedding(features, args.perplexity, args.seed)
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     category_names = {int(key): value["name"] for key, value in dataset.coco.cats.items()}
-    save_data(output_dir, features, embedding, groups, class_ids, image_ids, query_ids, ious)
+    class_records, audit = select_class_records(
+        records, known_ids, args.class_confidence, args.max_per_class, args.seed)
+    all_groups = np.asarray([r['group'] for r in records])
+    selected = group_balanced_indices(all_groups, args.max_per_group, args.seed)
+    group_records = [records[index] for index in selected]
+    print('Fitting group t-SNE...', flush=True)
+    embedding, groups, _ = project_records(group_records, output_dir, args, 'features')
     save_group_plot(embedding, groups, output_dir, args.max_per_group, args.seed)
-    save_class_plot(embedding, groups, class_ids, category_names, output_dir)
+    if len(class_records) >= 3:
+        print('Fitting known-class t-SNE...', flush=True)
+        class_embedding, class_groups, class_ids = project_records(
+            class_records, output_dir, args, 'class_features')
+        save_class_plot(class_embedding, class_groups, class_ids, category_names, output_dir)
+    else:
+        print('Class plot skipped: fewer than three eligible known objects.', flush=True)
     counts = {group: int((groups == group).sum()) for group in GROUP_ORDER}
     (output_dir / "summary.json").write_text(json.dumps({
         "run_dir": str(run_dir), "checkpoint": str(checkpoint_path),
         "validation_annotation": str(detector_args.val_ann),
-        "decoder_layer": -1, "feature_dimension": int(features.shape[1]),
+        "decoder_layer": -1, "feature_dimension": len(records[0]['feature']),
         "sample_counts": counts, "seed": args.seed,
         "iou_threshold": args.iou_threshold, "background_iou": args.background_iou,
+        "class_confidence": args.class_confidence, "class_counts": audit,
+        "missing_classes": [key for key, value in audit.items() if not value['eligible']],
+        "class_filter": "correct raw-logit argmax and confidence >= threshold",
+        "class_sampling": "equal count across classes with eligible samples; absent classes reported",
+        "projection": "independent group/class PCA+t-SNE; both class panels share the known-only fit",
+        "perplexity_requested": args.perplexity,
+        "category_names": category_names,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"Saved feature plots to {output_dir}")
 
