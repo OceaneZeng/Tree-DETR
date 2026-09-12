@@ -43,6 +43,8 @@ def parse_args(argv=None):
                         help="Draw a 2x4 class/group figure with one shared legend from four D2 checkpoints")
     parser.add_argument("--individual-task-plots", action="store_true",
                         help="Also save one class/group figure per task")
+    parser.add_argument("--classes-only", action="store_true",
+                        help="With --individual-task-plots, save only class figures")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -52,7 +54,7 @@ def parse_args(argv=None):
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--background-iou", type=float, default=0.1)
     parser.add_argument("--background-per-image", type=int, default=2)
-    parser.add_argument("--max-per-class", type=int, default=500)
+    parser.add_argument("--max-per-class", type=int, default=1000)
     parser.add_argument("--class-filter", choices=('matched', 'correct'), default='matched',
                         help="Use all IoU-matched known objects, or only confident correct predictions")
     parser.add_argument("--compare-before-training", action='store_true',
@@ -539,7 +541,7 @@ def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
 
 
 def save_individual_task_plots(embedding, tasks, groups, class_ids, category_names,
-                               task_classes, output_dir):
+                               task_classes, output_dir, classes_only=False):
     """Save separate class and group figures for each task, without axis text."""
     plt = configure_matplotlib()
     from matplotlib.lines import Line2D
@@ -558,7 +560,7 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         for class_id in ids:
             selected = task_mask & (class_ids == class_id)
             if selected.any():
-                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=11,
+                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=14,
                                    color=colors[class_id], alpha=0.86, linewidths=0, rasterized=True)
         class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
@@ -571,6 +573,9 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         class_figure.savefig(output_dir / f'd2_task_{index + 1}_classes.pdf',
                              bbox_inches='tight')
         plt.close(class_figure)
+
+        if classes_only:
+            continue
 
         group_figure, group_axis = plt.subplots(figsize=(6.8, 6.2))
         for group in ('Background', 'Unknown', 'Known'):
@@ -667,13 +672,15 @@ def run_four_tasks(args):
         del model, records, selected
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-    save_four_task_plot(np.concatenate(embeddings), np.asarray(task_labels),
-                        np.asarray(group_labels), np.asarray(all_class_ids),
-                        category_names, task_classes, output_dir)
+    if not args.classes_only:
+        save_four_task_plot(np.concatenate(embeddings), np.asarray(task_labels),
+                            np.asarray(group_labels), np.asarray(all_class_ids),
+                            category_names, task_classes, output_dir)
     if args.individual_task_plots:
         save_individual_task_plots(np.concatenate(embeddings), np.asarray(task_labels),
                                    np.asarray(group_labels), np.asarray(all_class_ids),
-                                   category_names, task_classes, output_dir)
+                                   category_names, task_classes, output_dir,
+                                   classes_only=args.classes_only)
     (output_dir / 'four_tasks_summary.json').write_text(json.dumps({
         'tasks': audits, 'manifest': str(manifest_path), 'config': str(config_path),
         'seed': args.seed, 'max_per_class': args.max_per_class, 'max_images': args.max_images,
