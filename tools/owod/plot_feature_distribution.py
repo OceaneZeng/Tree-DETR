@@ -566,16 +566,7 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         class_axis.set_box_aspect(1)
         class_axis.set_xticks([])
         class_axis.set_yticks([])
-        class_handles = [Line2D([], [], marker='o', linestyle='none', markersize=4.5,
-                                markerfacecolor=colors[c], markeredgewidth=0,
-                                label=category_names.get(c, str(c))) for c in ids]
-        class_figure.legend(class_handles, [h.get_label() for h in class_handles],
-                            title=f'Task {index + 1} classes', ncol=4, mode='expand',
-                            loc='lower left', bbox_to_anchor=(0.04, 0.01, 0.92, 0.19),
-                            frameon=False, fontsize=7.2, title_fontsize=9,
-                            labelspacing=0.55, columnspacing=1.0,
-                            handletextpad=0.35, borderaxespad=0)
-        class_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.23)
+        class_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.03)
         class_figure.savefig(output_dir / f'd2_task_{index + 1}_classes.png', dpi=500,
                              bbox_inches='tight')
         class_figure.savefig(output_dir / f'd2_task_{index + 1}_classes.pdf',
@@ -598,16 +589,7 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         group_axis.set_box_aspect(1)
         group_axis.set_xticks([])
         group_axis.set_yticks([])
-        group_handles = [Line2D([], [], marker=GROUP_MARKERS[group], linestyle='none',
-                                markersize=5, markerfacecolor=GROUP_COLORS[group],
-                                markeredgecolor=GROUP_COLORS[group], label=group)
-                         for group in GROUP_ORDER if np.any(task_mask & (group_names == group))]
-        group_figure.legend(group_handles, [h.get_label() for h in group_handles],
-                            title=f'Task {index + 1} groups', ncol=3, mode='expand',
-                            loc='lower left', bbox_to_anchor=(0.04, 0.03, 0.92, 0.13),
-                            frameon=False, fontsize=8, title_fontsize=9,
-                            columnspacing=1.2, handletextpad=0.4)
-        group_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.20)
+        group_figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.03)
         group_figure.savefig(output_dir / f'd2_task_{index + 1}_groups.png', dpi=500,
                              bbox_inches='tight')
         group_figure.savefig(output_dir / f'd2_task_{index + 1}_groups.pdf',
