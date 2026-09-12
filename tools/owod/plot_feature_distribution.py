@@ -560,7 +560,7 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         for class_id in ids:
             selected = task_mask & (class_ids == class_id)
             if selected.any():
-                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=10,
+                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=15,
                                    color=colors[class_id], alpha=0.78, linewidths=0, rasterized=True)
         class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
