@@ -70,6 +70,11 @@ def main(argv=None):
     parser.add_argument("--max-proposals", type=int, default=2000)
     parser.add_argument("--min-area", type=int, default=16)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Use a local/pilot manifest and mark proposals as non-paper-comparable",
+    )
     args = parser.parse_args(argv)
     if args.max_proposals <= 0 or args.min_area <= 0:
         raise ValueError("Proposal count and minimum area must be positive")
@@ -78,7 +83,8 @@ def main(argv=None):
     images = {}
     annotation_hashes = {}
     for stage in range(4):
-        manifest, files = stage_files(manifest_path, stage)
+        manifest, files = stage_files(
+            manifest_path, stage, allow_unverified=args.allow_unverified)
         if manifest.get("protocol") != "m-owodb":
             raise ValueError("CAT comparison requires protocol=m-owodb")
         increment = read_json(files["increment_train"])
@@ -99,6 +105,7 @@ def main(argv=None):
         "mode": args.mode,
         "max_proposals": str(args.max_proposals),
         "min_area": str(args.min_area),
+        "validation_mode": "unverified_local" if args.allow_unverified else "official",
     }
     with sqlite3.connect(args.output) as connection:
         connection.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')

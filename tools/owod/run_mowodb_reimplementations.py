@@ -55,10 +55,11 @@ def create_plan(args):
     coco_path = args.coco_path.resolve()
     manifest = read_json(manifest_path)
     if (manifest.get("protocol") != "m-owodb"
-            or not manifest.get("official_annotations")
-            or not manifest.get("paper_comparable")):
+            or (not args.allow_unverified and not manifest.get("official_annotations"))
+            or (not args.allow_unverified and not manifest.get("paper_comparable"))):
         raise ValueError(
-            "Require a validated, paper_comparable official M-OWODB manifest")
+            "Require a validated, paper_comparable official M-OWODB manifest, "
+            "or pass --allow-unverified for a local consistency run")
     if len(manifest.get("stages", [])) != 4:
         raise ValueError("M-OWODB requires exactly four stages")
     if len(args.gpus.split(",")) != 2 or len(set(args.gpus.split(","))) != 2:
@@ -89,7 +90,8 @@ def create_plan(args):
     all_images = set()
     stage_records = []
     for stage in range(4):
-        checked_manifest, files = stage_files(manifest_path, stage)
+        checked_manifest, files = stage_files(
+            manifest_path, stage, allow_unverified=args.allow_unverified)
         record = checked_manifest["stages"][stage]
         current_classes = list(record["classes"])
         if (len(current_classes) != 20 or set(current_classes) & set(previous_classes)):
@@ -195,7 +197,8 @@ def create_plan(args):
     plan = {
         "schema": 2,
         "protocol": "official_M-OWODB_20x4",
-        "paper_comparable_protocol": True,
+        "paper_comparable_protocol": not args.allow_unverified,
+        "validation_mode": "unverified_local" if args.allow_unverified else "official",
         "implementation": "from-paper reimplementation; not author source",
         "methods": list(methods_to_run),
         "gpus": args.gpus,
@@ -254,6 +257,11 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--summarize", action="store_true")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Use the local/pilot manifest and mark the run non-paper-comparable",
+    )
     args = parser.parse_args(argv)
     args.methods = selected_methods(args.methods)
     args.manifest = args.manifest.resolve()

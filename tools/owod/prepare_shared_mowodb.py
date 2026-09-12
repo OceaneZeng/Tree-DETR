@@ -173,6 +173,16 @@ def write_shared_configs(repo: Path, method: str) -> list[Path]:
             "PY_ARGS=${@:1}",
             'PY_ARGS="${@:1} --dataset TOWOD '
             '--data_root ${MOWODB_DATA_ROOT:?Set MOWODB_DATA_ROOT}"')
+        if name.startswith("EVAL_"):
+            # Upstream eval recipes refer to flattened tN.pth files, while
+            # the training scripts save checkpointXXXX.pth inside each stage.
+            for stage, checkpoint in (("t1", "checkpoint0040.pth"),
+                                      ("t2", "checkpoint0050.pth"),
+                                      ("t3", "checkpoint0120.pth"),
+                                      ("t4", "checkpoint0190.pth")):
+                content = content.replace(
+                    f'--pretrain "${{EXP_DIR}}/{stage}.pth"',
+                    f'--pretrain "${{EXP_DIR}}/{stage}/{checkpoint}"')
         target = configs / name.replace(".sh", "_SHARED.sh")
         target.write_text(content, encoding="utf-8")
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
