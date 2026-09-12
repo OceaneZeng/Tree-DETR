@@ -139,7 +139,7 @@ class PaperCriterion(SetCriterion):
             matched = self.matcher(layer, targets)
             classification_targets = copy.deepcopy(targets)
             classification_indices = matched
-            if self.epoch >= self.warmup:
+            if self.training and self.epoch >= self.warmup:
                 if self.method == 'cat':
                     selected = cat_pseudo_queries(
                         outputs['attention_feature'], layer['pred_boxes'], matched,
@@ -164,7 +164,7 @@ class PaperCriterion(SetCriterion):
                                                         alpha=self.focal_alpha, gamma=2) * foreground.shape[1]
             suffix = '' if index == 0 else f'_{index - 1}'
             losses.update({key + suffix: value for key, value in layer_losses.items()})
-        if self.method == 'cat':
+        if self.method == 'cat' and self.training:
             controller_loss = sum(
                 losses[name] * self.weight_dict[name]
                 for name in ('loss_ce', 'loss_bbox', 'loss_giou', 'loss_NC'))

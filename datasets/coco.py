@@ -14,6 +14,9 @@ Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references
 """
 from pathlib import Path
 import json
+import os
+import sqlite3
+import zlib
 
 import torch
 import torch.utils.data
@@ -32,12 +35,37 @@ class CocoDetection(TvCocoDetection):
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
         self.proposal_enabled = bool(proposal_file)
+        self.proposal_file = str(proposal_file) if proposal_file else ''
+        self._proposal_connection = None
+        self._proposal_pid = None
         self.proposals = {}
         if proposal_file:
-            payload = json.loads(Path(proposal_file).read_text(encoding='utf-8'))
-            if payload.get('coordinate_format') != 'xywh_absolute':
-                raise ValueError('CAT proposal file must use xywh_absolute coordinates')
-            self.proposals = {int(key): value for key, value in payload.get('proposals', {}).items()}
+            proposal_path = Path(proposal_file)
+            if proposal_path.suffix == '.sqlite3':
+                with sqlite3.connect(proposal_path) as connection:
+                    metadata = dict(connection.execute('SELECT key, value FROM metadata'))
+                if metadata.get('coordinate_format') != 'xywh_absolute':
+                    raise ValueError('CAT proposal database must use xywh_absolute coordinates')
+            else:
+                payload = json.loads(proposal_path.read_text(encoding='utf-8'))
+                if payload.get('coordinate_format') != 'xywh_absolute':
+                    raise ValueError('CAT proposal file must use xywh_absolute coordinates')
+                self.proposals = {int(key): value for key, value in payload.get('proposals', {}).items()}
+
+    def _proposal_boxes(self, image_id):
+        if Path(self.proposal_file).suffix != '.sqlite3':
+            return self.proposals.get(int(image_id), [])
+        pid = os.getpid()
+        if self._proposal_connection is None or self._proposal_pid != pid:
+            if self._proposal_connection is not None:
+                self._proposal_connection.close()
+            uri = Path(self.proposal_file).resolve().as_uri() + '?mode=ro'
+            self._proposal_connection = sqlite3.connect(uri, uri=True)
+            self._proposal_pid = pid
+        row = self._proposal_connection.execute(
+            'SELECT boxes FROM image_proposals WHERE image_id = ?',
+            (int(image_id),)).fetchone()
+        return [] if row is None else json.loads(zlib.decompress(row[0]))
 
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
@@ -45,7 +73,7 @@ class CocoDetection(TvCocoDetection):
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
         if self.proposal_enabled:
-            proposals = torch.as_tensor(self.proposals.get(int(image_id), []), dtype=torch.float32).reshape(-1, 4)
+            proposals = torch.as_tensor(self._proposal_boxes(image_id), dtype=torch.float32).reshape(-1, 4)
             if proposals.numel():
                 proposals[:, 2:] += proposals[:, :2]
             target['proposal_boxes'] = proposals

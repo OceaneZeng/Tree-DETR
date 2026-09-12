@@ -1,4 +1,6 @@
 pycocotools
 tqdm
+# CAT proposal preprocessing (selective search / ximgproc).
+opencv-contrib-python-headless>=4.8,<5
 cython
 scipy

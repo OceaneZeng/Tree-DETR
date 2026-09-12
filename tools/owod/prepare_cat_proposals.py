@@ -6,26 +6,24 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sqlite3
+import sys
+import zlib
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.owod.protocol import file_sha256, stage_files
 
 
-ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "data/coco-owod/m-owodb/split_manifest.json"
 DEFAULT_COCO = ROOT / "data/coco"
-DEFAULT_OUTPUT = ROOT / "data/derived/m-owodb-cat/selective_search.json"
+DEFAULT_OUTPUT = ROOT / "data/derived/m-owodb-cat/selective_search.sqlite3"
 
 
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def write_json(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                         encoding="utf-8", newline="\n")
-    temporary.replace(path)
 
 
 def selective_search(image_path, mode, max_proposals, min_area):
@@ -87,53 +85,46 @@ def main(argv=None):
         images.update({int(image["id"]): image for image in increment["images"]})
         annotation_hashes[str(files["increment_train"])] = file_sha256(files["increment_train"])
 
-    proposals = {}
-    if args.resume and args.output.is_file():
-        existing = read_json(args.output)
-        if (existing.get("manifest_sha256") != file_sha256(manifest_path)
-                or existing.get("mode") != args.mode
-                or existing.get("max_proposals") != args.max_proposals
-                or existing.get("min_area") != args.min_area):
-            raise ValueError("Existing proposal cache uses a different manifest/configuration")
-        proposals.update(existing.get("proposals", {}))
-
-    for position, (image_id, image) in enumerate(sorted(images.items()), start=1):
-        key = str(image_id)
-        if key in proposals:
-            continue
-        image_path = coco_path / "train2017" / image["file_name"]
-        proposals[key] = selective_search(
-            image_path, args.mode, args.max_proposals, args.min_area)
-        if position % 100 == 0:
-            print(f"processed {position}/{len(images)}", flush=True)
-            write_json(args.output, {
-                "schema_version": 1,
-                "method": "CAT input-driven pseudo-labelling",
-                "algorithm": "OpenCV selective search",
-                "coordinate_format": "xywh_absolute",
-                "manifest": str(manifest_path),
-                "manifest_sha256": file_sha256(manifest_path),
-                "annotation_sha256": annotation_hashes,
-                "mode": args.mode,
-                "max_proposals": args.max_proposals,
-                "min_area": args.min_area,
-                "proposals": proposals,
-            })
-    payload = {
-        "schema_version": 1,
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output.exists() and not args.resume:
+        raise FileExistsError(f"Proposal database exists; pass --resume: {args.output}")
+    metadata = {
+        "schema_version": "1",
         "method": "CAT input-driven pseudo-labelling",
         "algorithm": "OpenCV selective search",
         "coordinate_format": "xywh_absolute",
         "manifest": str(manifest_path),
         "manifest_sha256": file_sha256(manifest_path),
-        "annotation_sha256": annotation_hashes,
+        "annotation_sha256": json.dumps(annotation_hashes, sort_keys=True),
         "mode": args.mode,
-        "max_proposals": args.max_proposals,
-        "min_area": args.min_area,
-        "proposals": proposals,
+        "max_proposals": str(args.max_proposals),
+        "min_area": str(args.min_area),
     }
-    write_json(args.output, payload)
-    print(f"wrote {len(proposals)} image proposal sets to {args.output}")
+    with sqlite3.connect(args.output) as connection:
+        connection.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        connection.execute('CREATE TABLE IF NOT EXISTS image_proposals '
+                           '(image_id INTEGER PRIMARY KEY, boxes BLOB NOT NULL)')
+        existing = dict(connection.execute('SELECT key, value FROM metadata'))
+        if existing and existing != metadata:
+            raise ValueError("Existing proposal database uses a different manifest/configuration")
+        connection.executemany('INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)',
+                               metadata.items())
+        completed = {row[0] for row in connection.execute('SELECT image_id FROM image_proposals')}
+        for position, (image_id, image) in enumerate(sorted(images.items()), start=1):
+            if image_id in completed:
+                continue
+            image_path = coco_path / "train2017" / image["file_name"]
+            boxes = selective_search(
+                image_path, args.mode, args.max_proposals, args.min_area)
+            blob = zlib.compress(json.dumps(boxes, separators=(',', ':')).encode('utf-8'))
+            connection.execute('INSERT INTO image_proposals(image_id, boxes) VALUES (?, ?)',
+                               (image_id, blob))
+            if position % 100 == 0:
+                connection.commit()
+                print(f"processed {position}/{len(images)}", flush=True)
+        connection.commit()
+        count = connection.execute('SELECT COUNT(*) FROM image_proposals').fetchone()[0]
+    print(f"wrote {count} image proposal sets to {args.output}")
     return 0
 
 

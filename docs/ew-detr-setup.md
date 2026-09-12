@@ -1,5 +1,9 @@
 # EW-DETR 实验配置与运行
 
+> 当前正式 M-OWODB 对比请使用 `docs/cat-ew-detr-mowodb.md` 和
+> `tools/owod/run_mowodb_reimplementations.py`。本文其余内容保留为旧
+> `pilot_unverified` 实验记录，不能用于论文级 M-OWODB 对比。
+
 本文说明如何在当前 Tree-DETR 仓库中配置并运行 EW-DETR。实验通过 Git 同步到服务器，使用仓库内的 `tools/owod/run_paper_baselines.py` 自动生成并按顺序执行 Stage 0 到 Stage 3。
 
 当前配置是将 EW-DETR 适配到项目内部 COCO OWOD 四阶段协议的受控实验，不是 EW-DETR 原论文数据集、训练轮数或分数的精确复现。

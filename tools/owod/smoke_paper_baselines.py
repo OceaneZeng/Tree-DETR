@@ -17,11 +17,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', default='cuda')
     options = parser.parse_args()
-    for method in ('ow-detr', 'ew-detr'):
+    for method in ('ow-detr', 'cat', 'ew-detr'):
         torch.manual_seed(42)
-        args = get_args_parser().parse_args([
+        arguments = [
             '--paper-baseline', method, '--num_classes', '92', '--lr_backbone', '0',
-            '--owod-known-class-ids', '2', '9', '--device', options.device])
+            '--owod-known-class-ids', '2', '9', '--device', options.device]
+        if method == 'cat':
+            arguments.extend(['--cat-proposals', 'synthetic-smoke-proposals.json'])
+        args = get_args_parser().parse_args(arguments)
         model, criterion, post = build(args)
         model.to(options.device).train()
         criterion.to(options.device)
@@ -31,7 +34,10 @@ def main():
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-4)
         samples = torch.randn(2, 3, 128, 128, device=options.device)
         targets = [{'labels': torch.tensor([2], device=options.device),
-                    'boxes': torch.tensor([[.5, .5, .3, .3]], device=options.device)} for _ in range(2)]
+                    'boxes': torch.tensor([[.5, .5, .3, .3]], device=options.device),
+                    **({'proposal_boxes': torch.tensor(
+                        [[.2, .2, .2, .2], [.7, .7, .2, .2]], device=options.device)}
+                       if method == 'cat' else {})} for _ in range(2)]
         for _ in range(2):
             optimizer.zero_grad()
             output = model(samples)

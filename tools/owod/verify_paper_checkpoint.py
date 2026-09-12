@@ -43,7 +43,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--epochs', type=int, required=True)
-    parser.add_argument('--method', choices=('d4', 'ow-detr', 'ew-detr'), required=True)
+    parser.add_argument('--method', choices=('d4', 'ow-detr', 'cat', 'ew-detr'), required=True)
     parser.add_argument('--stage', type=int, required=True)
     args = parser.parse_args()
     verify(args.directory, args.epochs, args.method, args.stage)

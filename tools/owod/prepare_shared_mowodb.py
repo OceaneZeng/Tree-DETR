@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import stat
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -174,6 +175,7 @@ def write_shared_configs(repo: Path, method: str) -> list[Path]:
             '--data_root ${MOWODB_DATA_ROOT:?Set MOWODB_DATA_ROOT}"')
         target = configs / name.replace(".sh", "_SHARED.sh")
         target.write_text(content, encoding="utf-8")
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
         generated.append(target)
     return generated
 

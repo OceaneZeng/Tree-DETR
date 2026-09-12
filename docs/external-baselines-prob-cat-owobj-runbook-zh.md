@@ -183,15 +183,8 @@ H-Score；不要把 PROB/OWOBJ 的作者表格数字直接当作本地复现结�
 
 ## CAT
 
-CAT 的论文代码链接当前无法访问，仓库中没有可验证的训练入口、commit 或
-配置，因此本项目不会用 Tree-DETR 的简化模块冒充 CAT。获得作者源码后，执行：
-
-```bash
-python tools/owod/prepare_external_baselines.py \
-  --methods cat \
-  --cat-repo <verified-CAT-repository-url-or-local-path> \
-  --repo-root baselines
-```
-
-在确认入口、数据协议和许可证后，再把作者的训练/评估命令写入 manifest；
-在此之前 CAT 只能记录为 `pending_source`，不能用 Tree-DETR 的简化模块冒充。
+CAT 的论文代码链接当前无法访问，因此 `prepare_external_baselines.py` 仍将官方
+源码状态记录为 `pending_source`。项目另提供严格区分来源的论文级重实现，包含
+共享 decoder 级联、自适应伪标签和 selective search 输入先验。实现假设、正式
+M-OWODB 预处理以及 tmux 命令见 `docs/cat-ew-detr-mowodb.md`。结果必须标记为
+`CAT (paper reimplementation)`，不能标记为作者官方实现结果。
