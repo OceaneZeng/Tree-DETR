@@ -41,6 +41,8 @@ def parse_args(argv=None):
     parser.add_argument("--task-checkpoints", nargs=4, type=Path,
                         metavar=('TASK1', 'TASK2', 'TASK3', 'TASK4'),
                         help="Draw a 2x4 class/group figure with one shared legend from four D2 checkpoints")
+    parser.add_argument("--individual-task-plots", action="store_true",
+                        help="Also save one class/group figure per task")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -484,8 +486,6 @@ def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
                              color=colors[class_id], alpha=0.8, linewidths=0, rasterized=True)
         class_axis.set_title(f'({panel_letters[index]}) Task {index + 1}: known classes',
                              fontsize=11, pad=7)
-        class_axis.set_ylabel('t-SNE 2' if index == 0 else '')
-        class_axis.set_xlabel('t-SNE 1')
         class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
         class_axis.set_box_aspect(1)
@@ -507,8 +507,6 @@ def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
                     rasterized=True)
         group_axis.set_title(f'({panel_letters[index + 4]}) Task {index + 1}: groups',
                              fontsize=11, pad=7)
-        group_axis.set_ylabel('t-SNE 2' if index == 0 else '')
-        group_axis.set_xlabel('t-SNE 1')
         group_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         group_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
         group_axis.set_box_aspect(1)
@@ -538,6 +536,63 @@ def save_four_task_plot(embedding, tasks, groups, class_ids, category_names,
     figure.savefig(output_dir / 'd2_four_tasks_distribution.pdf', bbox_inches='tight')
     figure.savefig(output_dir / 'd2_four_tasks_distribution.png', dpi=500, bbox_inches='tight')
     plt.close(figure)
+
+
+def save_individual_task_plots(embedding, tasks, groups, class_ids, category_names,
+                               task_classes, output_dir):
+    """Save one compact class/group figure for each task, without axis text."""
+    plt = configure_matplotlib()
+    from matplotlib.lines import Line2D
+
+    ordered_ids = list(dict.fromkeys(c for ids in task_classes for c in ids))
+    palette = [plt.get_cmap(name)(i) for name in ('tab20', 'tab20b', 'tab20c') for i in range(20)]
+    palette += [plt.get_cmap('turbo')(i / 19) for i in range(20)]
+    colors = {c: palette[i % len(palette)] for i, c in enumerate(ordered_ids)}
+    task_names = np.asarray(tasks)
+    group_names = merge_known_groups(groups)
+    for index, ids in enumerate(task_classes):
+        task_mask = task_names == f'Task {index + 1}'
+        lower, upper = embedding[task_mask].min(axis=0), embedding[task_mask].max(axis=0)
+        padding = np.maximum((upper - lower) * 0.05, 1)
+        figure, axes = plt.subplots(1, 2, figsize=(11.2, 5.6), constrained_layout=False)
+        for class_id in ids:
+            selected = task_mask & (class_ids == class_id)
+            if selected.any():
+                axes[0].scatter(embedding[selected, 0], embedding[selected, 1], s=8,
+                                color=colors[class_id], alpha=0.8, linewidths=0, rasterized=True)
+        for group in ('Background', 'Unknown', 'Known'):
+            selected = task_mask & (group_names == group)
+            if selected.any():
+                axes[1].scatter(embedding[selected, 0], embedding[selected, 1],
+                                s=13 if group == 'Background' else 15,
+                                color=GROUP_COLORS[group], marker=GROUP_MARKERS[group],
+                                alpha=0.65 if group == 'Background' else 0.78,
+                                linewidths=0.35 if group == 'Background' else 0,
+                                rasterized=True)
+        for panel, title in zip(axes, ('Known classes', 'Groups')):
+            panel.set_title(title, fontsize=11, pad=7)
+            panel.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
+            panel.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
+            panel.set_box_aspect(1)
+            panel.set_xticks([])
+            panel.set_yticks([])
+        group_handles = [Line2D([], [], marker=GROUP_MARKERS[group], linestyle='none',
+                                markersize=5, markerfacecolor=GROUP_COLORS[group],
+                                markeredgecolor=GROUP_COLORS[group], label=group)
+                         for group in GROUP_ORDER if np.any(task_mask & (group_names == group))]
+        class_handles = [Line2D([], [], marker='o', linestyle='none', markersize=4.5,
+                                markerfacecolor=colors[c], markeredgewidth=0,
+                                label=category_names.get(c, str(c))) for c in ids]
+        figure.legend(group_handles + class_handles,
+                      [h.get_label() for h in group_handles + class_handles],
+                      title=f'Task {index + 1}', ncol=6, mode='expand', loc='lower left',
+                      bbox_to_anchor=(0.04, 0.01, 0.92, 0.18), frameon=False,
+                      fontsize=7.2, title_fontsize=9, labelspacing=0.55,
+                      columnspacing=1.0, handletextpad=0.35, borderaxespad=0)
+        figure.subplots_adjust(left=0.03, right=0.97, top=0.90, bottom=0.22, wspace=0.08)
+        figure.savefig(output_dir / f'd2_task_{index + 1}_distribution.pdf', bbox_inches='tight')
+        figure.savefig(output_dir / f'd2_task_{index + 1}_distribution.png', dpi=500, bbox_inches='tight')
+        plt.close(figure)
 
 
 def four_task_class_sets(manifest):
@@ -615,6 +670,10 @@ def run_four_tasks(args):
     save_four_task_plot(np.concatenate(embeddings), np.asarray(task_labels),
                         np.asarray(group_labels), np.asarray(all_class_ids),
                         category_names, task_classes, output_dir)
+    if args.individual_task_plots:
+        save_individual_task_plots(np.concatenate(embeddings), np.asarray(task_labels),
+                                   np.asarray(group_labels), np.asarray(all_class_ids),
+                                   category_names, task_classes, output_dir)
     (output_dir / 'four_tasks_summary.json').write_text(json.dumps({
         'tasks': audits, 'manifest': str(manifest_path), 'config': str(config_path),
         'seed': args.seed, 'max_per_class': args.max_per_class, 'max_images': args.max_images,

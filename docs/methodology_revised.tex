@@ -1,0 +1,258 @@
+\section{Methodology}
+\label{sec:Methodology}
+
+\subsection{Problem Definition}
+\label{sec:ProblemDefinition}
+
+In Open-World Object Detection (OWOD), a detector is trained over a sequence of
+incremental tasks $\mathcal{T}=\{T_t\}_{t=1}^{N}$. At task $T_t$, the detector
+receives a partially annotated dataset $\mathcal{D}_t=\{(x_n,Y_n)\}$, where
+$x_n$ is an image and $Y_n$ contains bounding boxes and labels for the newly
+introduced categories $K_t$. We use $\mathcal{K}_{t-1}$ to denote the
+categories learned before task $T_t$ and let $\mathcal{K}_t=\mathcal{K}_{t-1}
+\cup K_t$. The task-specific category sets are disjoint, and objects from
+$\mathcal{K}_{t-1}$ or from the still-unseen set may appear in $x_n$ without
+annotations in $Y_n$.
+
+At task $T_t$, the detector therefore operates on the label space
+$\mathcal{K}_t\cup\{\mathrm{unknown}\}$. The unknown label is a shared label
+for categories outside $\mathcal{K}_t$ and does not assert that every such
+category is present in the current images. Let $f_{\theta_t}$ denote the
+detector after task $T_t$, and let $\mathcal{M}_{t-1}$ be a bounded replay
+memory with budget $B$. Given $f_{\theta_{t-1}}$, $\mathcal{D}_t$, and
+$\mathcal{M}_{t-1}$, the detector must learn $K_t$ while preserving the
+previously learned categories $\mathcal{K}_{t-1}$. The relevant interference
+relations are defined on the ordered pairs $(u,c)\in K_t\times\mathcal{K}_{t-1}$,
+where $u$ is a current category and $c$ is an old category.
+
+We measure stage-wise forgetting on the previously learned categories as
+\begin{equation}
+ F_t=\left[\operatorname{mAP}_{\mathcal{K}_{t-1}}(f_{\theta_{t-1}})-
+ \operatorname{mAP}_{\mathcal{K}_{t-1}}(f_{\theta_t})\right]_+,
+ \qquad [z]_+=\max(z,0),
+\label{eq:stage_forgetting}
+\end{equation}
+where $\operatorname{mAP}_{\mathcal{K}_{t-1}}$ is evaluated on the same old
+category set before and after the update. Our objective is to improve the
+current categories under a fixed replay budget while minimizing $F_t$.
+Unknown-object recall is reported as a retained capability of the underlying
+OWOD detector, rather than as a separately optimized objective.
+
+\subsection{Overall Architecture}
+\label{sec:overall_architecture}
+
+We build upon a DETR-based detector and leave its unknown-object discovery
+mechanism unchanged. As shown in Figure~\ref{fig:overall_architecture}, our
+framework contains three modules: a Class-Interference GNN, Graph-Guided
+Detector Adaptation, and a Graph-Conditioned Continual Objective.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/architecture.pdf}
+    \Description{Overview of GLCA-DETR, in which the Class-Interference GNN
+    generates an interference neighborhood that guides detector adaptation and
+    the continual learning objective during unknown-to-known conversion.}
+    \caption{
+    Overview of the proposed \textbf{Graph-Local Continual Adaptation}
+    framework for open-world object detection. Unknown proposal generation is
+    handled by the OWOD detector and is separated from the continual adaptation
+    process.
+    }
+    \label{fig:overall_architecture}
+\end{figure}
+
+First, the Class-Interference GNN predicts which previously learned categories
+are most vulnerable to the current set of new categories. Its directed scores
+are aggregated into a task-level interference neighborhood $\mathcal{N}_t$.
+Second, Graph-Guided Detector Adaptation maps $\mathcal{N}_t$ to the detector
+parameters exposed to the incremental update. The neighborhood does not
+introduce a separate parameter bank or a forward routing gate for each
+category. Finally, the Graph-Conditioned Continual Objective uses the same
+neighborhood to organize replay, complete missing old-category annotations,
+and regularize both local competition and off-neighborhood drift.
+
+The three modules are coupled only through the stage-level neighborhood. The
+GNN is evaluated from stage-start detector statistics and is fixed during the
+current detector optimization. The adaptation module maps the predicted risk
+to trainable detector capacity, while the continual objective
+converts the same risk estimate into replay and protection signals. At
+inference, the detector is used without the GNN, teacher, or replay machinery.
+
+\subsection{Class-Interference GNN}
+\label{sec:class_interference_gnn}
+
+Learning a new category can affect old categories unevenly. Uniform replay
+does not distinguish an old category that is highly vulnerable from one that is
+largely unaffected. We therefore construct a directed class graph whose nodes
+are represented by category-conditioned decoder gradients.
+
+For each category $c$, we compute the gradient of its class-conditioned
+detection loss with respect to the selected decoder FFN parameters and compress
+it into a fixed-dimensional node feature:
+\begin{equation}
+ g_c=\operatorname{vec}\!\left(\nabla_{\Theta_{\mathrm{FFN}}}
+ \mathcal{L}_c(\theta_{t-1})\right),\qquad
+ x_c=\operatorname{Normalize}\!\left(\operatorname{Pool}(g_c)\right).
+\label{eq:class_gradient}
+\end{equation}
+where $\mathcal{L}_c$ is evaluated with category-conditioned targets, $g_c$
+retains the full parameter-coordinate gradient, and $x_c$ is only a compressed
+representation used by the GNN. These statistics are computed at stage setup
+and are not gradients propagated through the current detector update.
+
+To obtain supervision for a directed edge, we perform a short adaptation probe
+for a source category $u$ and measure the resulting loss increase for an old
+target category $c$:
+\begin{equation}
+ h_{u\rightarrow c}=\left[\mathcal{L}_c(\theta_{t-1}+
+ \Delta\theta^{\mathrm{probe}}_u)-\mathcal{L}_c(\theta_{t-1})\right]_+ .
+\label{eq:empirical_harm}
+\end{equation}
+where $\Delta\theta^{\mathrm{probe}}_u$ is a temporary update fitted on source
+category $u$ and discarded after the probe. Thus, $h_{u\rightarrow c}$ is an
+empirical train-loss increase, rather than a calibrated probability or a
+validation AP difference.
+
+The GNN applies directed message passing and an edge predictor to the node
+features. Let $a_{u\rightarrow c}$ be the predicted edge logit and
+$p_{u\rightarrow c}=\sigma(a_{u\rightarrow c})$ its score. We train the GNN
+with a regression term and a within-source ranking term:
+\begin{equation}
+ \mathcal{L}_{\mathrm{GNN}}=
+ \frac{1}{|\mathcal{E}_v|}\sum_{(u,c)\in\mathcal{E}_v}
+ \operatorname{SmoothL1}(p_{u\rightarrow c},\widetilde h_{u\rightarrow c})
+ +\frac{\lambda_r}{\max(1,|\mathcal{R}|)}\sum_{(u,c^+,c^-)\in\mathcal{R}}
+ [m_r-a_{u\rightarrow c^+}+a_{u\rightarrow c^-}]_+ .
+\label{eq:gnn_loss}
+\end{equation}
+where $\mathcal{E}_v$ contains measured off-diagonal edges, $\widetilde h$ is
+the row-normalized harm target, and $\mathcal{R}$ contains positive-negative
+target pairs from the same source category. The ranking term is omitted when
+no valid positive-negative pair is available. The GNN is pretrained on
+completed-stage artifacts and is frozen during the current detector training.
+
+For multiple new categories, we aggregate their new-to-old scores and select
+the vulnerable old categories:
+\begin{equation}
+ s_t(c)=\max_{u\in K_t}p_{u\rightarrow c},\qquad
+ \mathcal{N}_t=\operatorname{TopK}_{c\in\mathcal{K}_{t-1}}s_t(c).
+\label{eq:interference_neighborhood}
+\end{equation}
+where the maximum operator marks an old category as vulnerable when it is
+strongly affected by any current category, and $\mathcal{N}_t$ contains old
+categories only. The resulting neighborhood is cached and passed to the two
+downstream modules through stage-level control signals; the GNN does not
+receive gradients from $\mathcal{L}_{\mathrm{total}}$.
+
+\subsection{Graph-Guided Detector Adaptation}
+\label{sec:graph_guided_detector_adaptation}
+
+Updating the complete detector during an incremental task can alter
+representations that are unrelated to the current categories. To address this,
+Graph-Guided Detector Adaptation converts the predicted class neighborhood into
+a detector-level update mask. Let $\mathcal{P}(\mathcal{N}_t)$ denote the
+parameter subset associated with the current interference neighborhood. The
+incremental update is expressed as
+\begin{equation}
+ \theta_t=\theta_{t-1}+\Delta\theta_t,\qquad
+ \operatorname{supp}(\Delta\theta_t)\subseteq
+ \mathcal{P}(\mathcal{N}_t).
+\label{eq:graph_guided_update}
+\end{equation}
+where $\Delta\theta_t$ is induced by the objective in
+Section~\ref{sec:graph_conditioned_objective}, and
+$\operatorname{supp}(\cdot)$ denotes the parameter entries permitted to receive
+nonzero updates. Parameters outside $\mathcal{P}(\mathcal{N}_t)$ remain fixed,
+whereas the selected parameters receive gradients from current-category and
+replay supervision.
+
+This detector-level selection does not require one adapter for every category.
+Instead, a single task-level neighborhood determines the parameters exposed to
+the update. Consequently, the method concentrates adaptation on the predicted
+interference pattern while retaining a standard detector architecture at
+inference.
+
+\subsection{Graph-Conditioned Continual Objective}
+\label{sec:graph_conditioned_objective}
+
+The continual objective converts the predicted neighborhood into three
+complementary training signals. First, every old category receives a base
+replay quota, while categories in $\mathcal{N}_t$ receive additional examples.
+We write this policy in the text as $q_c=b+e\mathbb{1}[c\in\mathcal{N}_t]$ for
+$c\in\mathcal{K}_{t-1}$, where $b$ and $e$ are the base and extra quotas. A
+fixed replay ratio keeps the number of optimization steps comparable across
+different neighborhood choices.
+
+Second, the same mixed images are passed to a frozen previous-task teacher.
+The teacher predicts all old categories, after which confidence filtering,
+class-wise duplicate suppression, and ground-truth overlap filtering remove
+unreliable candidates. For an image $x_n$, we write the resulting target
+completion in the text as $\widetilde{Y}_n=Y_n\cup
+\widehat{Y}^{\mathrm{old}}_n$, where
+$\widehat{Y}^{\mathrm{old}}_n$ contains the retained teacher predictions. This
+operation completes the annotations of the same images rather than combining
+two independent image datasets.
+
+Finally, let $\mathcal{C}_t^{\mathrm{loc}}=K_t\cup\mathcal{N}_t$ be the local
+category set and let $\mathcal{M}_t$ contain Hungarian-matched query--label
+pairs whose labels belong to this set. We encourage the correct logit to exceed
+its strongest local competitor. In parallel, we form an orthonormal basis
+$U_{\mathrm{off}}\in\mathbb{R}^{D\times d_{\mathrm{off}}}$ from the
+full-coordinate gradients of categories in
+$\mathcal{K}_{t-1}\setminus\mathcal{N}_t$ and penalize the component of the
+vectorized update $\delta_t\in\mathbb{R}^{D}$ within this basis. The two
+constraints and the complete objective are summarized as
+\begin{equation}
+\begin{aligned}
+ \mathcal{L}_{\mathrm{local}}
+ &=\frac{1}{\max(1,|\mathcal{M}_t|)}\sum_{(q,y)\in\mathcal{M}_t}
+ \left[m-z_{q,y}+\max_{c\in\mathcal{C}_t^{\mathrm{loc}}\setminus\{y\}}
+ z_{q,c}\right]_+,\\
+ \mathcal{L}_{\mathrm{off}}
+ &=\frac{1}{\max(1,d_{\mathrm{off}})}\left\|U_{\mathrm{off}}^{\top}
+ \delta_t\right\|_2^2,\\
+ \mathcal{L}_{\mathrm{total}}
+ &=\mathcal{L}_{\mathrm{det}}+
+ \lambda_{\mathrm{local}}\mathcal{L}_{\mathrm{local}}+
+ \lambda_{\mathrm{off}}\mathcal{L}_{\mathrm{off}}.
+\end{aligned}
+\label{eq:total_objective}
+\end{equation}
+where $m$ is the local margin, $z_{q,c}$ is the logit of query $q$ for category
+$c$, $d_{\mathrm{off}}$ is the retained basis dimension, and
+$\mathcal{L}_{\mathrm{det}}$ is the weighted DETR classification, L1, and
+generalized-IoU loss evaluated on the completed targets after Hungarian
+matching. The local loss is zero when $\mathcal{M}_t$ is empty, and the
+projection loss is zero when $d_{\mathrm{off}}=0$. These terms encourage local
+discrimination and first-order protection; they do not guarantee zero
+forgetting. No optimization gradient is propagated to the GNN, the frozen
+teacher, or the cached neighborhood.
+
+\begin{algorithm}[t]
+\caption{Graph-Guided Continual Adaptation at Task $T_t$}
+\label{alg:graph_guided_adaptation}
+\begin{algorithmic}[1]
+\Require Previous detector $f_{\theta_{t-1}}$, current data $\mathcal{D}_t$,
+ replay memory $\mathcal{M}_{t-1}$, pretrained GNN $G_\phi$, old classes
+ $\mathcal{K}_{t-1}$, new classes $K_t$, quotas $b,e$, neighborhood size $K$.
+\Ensure Adapted detector $f_{\theta_t}$ and updated memory $\mathcal{M}_t$.
+\State Construct stage-start category gradients and node features using Eq.~\ref{eq:class_gradient}.
+\State Predict directed scores with the frozen GNN and compute $\mathcal{N}_t$ using Eq.~\ref{eq:interference_neighborhood}.
+\State Map $\mathcal{N}_t$ to the trainable subset $\mathcal{P}(\mathcal{N}_t)$ using Eq.~\ref{eq:graph_guided_update}.
+\State Allocate base replay to all old classes and additional replay to $\mathcal{N}_t$.
+\State Initialize a student from $f_{\theta_{t-1}}$ and keep a frozen copy as the teacher.
+\For{each incremental training minibatch}
+    \State Sample current and replay images from the mixed sampler.
+    \State Generate and filter teacher predictions for all old categories.
+    \State Merge retained predictions with the labels of the same images.
+    \State Match student predictions to the completed targets and compute Eq.~\ref{eq:total_objective}.
+    \State Update only the parameters in $\mathcal{P}(\mathcal{N}_t)$.
+\EndFor
+\State Update the bounded replay memory and return $f_{\theta_t}$.
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:graph_guided_adaptation} separates the two time scales of
+the method: graph calibration and neighborhood selection occur at stage setup,
+whereas teacher completion and detector optimization occur for every training
+minibatch. During inference, only the adapted detector is retained.
