@@ -54,7 +54,7 @@ def parse_args(argv=None):
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--background-iou", type=float, default=0.1)
     parser.add_argument("--background-per-image", type=int, default=2)
-    parser.add_argument("--max-per-class", type=int, default=1000)
+    parser.add_argument("--max-per-class", type=int, default=500)
     parser.add_argument("--class-filter", choices=('matched', 'correct'), default='matched',
                         help="Use all IoU-matched known objects, or only confident correct predictions")
     parser.add_argument("--compare-before-training", action='store_true',
@@ -560,8 +560,8 @@ def save_individual_task_plots(embedding, tasks, groups, class_ids, category_nam
         for class_id in ids:
             selected = task_mask & (class_ids == class_id)
             if selected.any():
-                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=14,
-                                   color=colors[class_id], alpha=0.86, linewidths=0, rasterized=True)
+                class_axis.scatter(embedding[selected, 0], embedding[selected, 1], s=10,
+                                   color=colors[class_id], alpha=0.78, linewidths=0, rasterized=True)
         class_axis.set_xlim(lower[0] - padding[0], upper[0] + padding[0])
         class_axis.set_ylim(lower[1] - padding[1], upper[1] + padding[1])
         class_axis.set_box_aspect(1)
