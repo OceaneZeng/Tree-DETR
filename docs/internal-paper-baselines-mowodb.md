@@ -21,7 +21,7 @@ mkdir -p "$PWD/exps/owod/m-owodb/order0/pilot_unverified/internal_baselines"
 
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1 \
 python -u tools/owod/run_mowodb_reimplementations.py \
-  --methods ow-detr prob owobj cat \
+  --methods prob owobj cat \
   --manifest "$PWD/data/coco-owod/m-owodb/order0/split_manifest.json" \
   --coco-path "$PWD/data/coco" \
   --cat-proposals "$PWD/data/derived/m-owodb-cat/selective_search.sqlite3" \
@@ -45,7 +45,7 @@ Summarize without loading a model:
 
 ```bash
 python tools/owod/run_mowodb_reimplementations.py \
-  --methods ow-detr prob owobj cat \
+  --methods prob owobj cat \
   --output-dir "$PWD/exps/owod/m-owodb/order0/pilot_unverified/internal_baselines" \
   --summarize
 ```
@@ -54,3 +54,7 @@ PROB uses the BN feature-energy objectness from the paper.  OWOBJ uses the
 stochastic sketch energy and energy-margin loss.  Both are explicitly marked
 as local paper reimplementations; their scores are not author-repository
 results and should be compared with the same local Tree-DETR protocol.
+
+OW-DETR is intentionally excluded: its completed four-stage result already
+exists in the project result table. It remains an explicit runner option only
+for historical compatibility and must not be launched as part of this queue.

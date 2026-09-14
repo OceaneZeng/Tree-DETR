@@ -1,0 +1,58 @@
+\documentclass[10pt]{article}
+\usepackage[a4paper,margin=25mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\algrenewcommand{\algorithmicrequire}{\textbf{Input:}}
+\algrenewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\begin{document}
+
+\begin{algorithm}[t]
+\caption{Training the Class-Interference GNN}
+\label{alg:gnn_training}
+\begin{algorithmic}[1]
+\Require Historical stages $\mathcal{S}_{\mathrm{hist}}$ with pre-update
+detectors, class data, and validation data; GNN $G_\phi$;
+probe step size $\eta$; learning rate $\eta_g$; training epochs $E$
+\Ensure Trained class-interference GNN $G_\phi$
+\State Initialize historical artifact set $\mathcal{A}\gets\emptyset$
+\For{each stage $s\in\mathcal{S}_{\mathrm{hist}}$}
+    \State Load pre-update detector $f_{\theta_s}$
+    \For{each category $c$ observed at stage $s$}
+        \State Compute category-conditioned detection loss $\mathcal{L}_c$
+        \State $g_c\gets\operatorname{vec}(\nabla_{\Theta_{\mathrm{FFN},s}}\mathcal{L}_c)$
+        \State Compress and normalize $g_c$ to obtain node feature $x_c$
+    \EndFor
+    \For{each newly introduced category $u$ at stage $s$}
+        \State Normalize and reshape $g_u$ to obtain $\bar{G}_u$
+        \State $\Theta_{\mathrm{FFN},s,u}^{\mathrm{probe}}
+        \gets\Theta_{\mathrm{FFN},s}-\eta\bar{G}_u$
+        \For{each old category $c$ at stage $s$}
+            \State $H_{u\rightarrow c}\gets
+            [\operatorname{AP}_c(f_{\theta_s})-
+            \operatorname{AP}_c(f_{\theta_{s,u}^{\mathrm{probe}}})]_+$
+        \EndFor
+        \State Restore pre-update detector $f_{\theta_s}$
+    \EndFor
+    \State Store node features and measured harm in $\mathcal{A}$
+\EndFor
+\For{$e=1,\ldots,E$}
+    \For{each historical artifact in $\mathcal{A}$}
+        \State Predict directed edge scores with $G_\phi$
+        \State Normalize harm targets within each source category
+        \State Compute harm regression loss $\mathcal{L}_{\mathrm{reg}}$
+        \State Compute pairwise ranking loss $\mathcal{L}_{\mathrm{rank}}$
+        \State $\mathcal{L}_{\mathrm{GNN}}\gets
+        \mathcal{L}_{\mathrm{reg}}+
+        \lambda_{\mathrm{rank}}\mathcal{L}_{\mathrm{rank}}$
+        \State $\phi\gets\phi-\eta_g\nabla_\phi\mathcal{L}_{\mathrm{GNN}}$
+    \EndFor
+\EndFor
+\State Freeze $G_\phi$ for neighborhood prediction at the current stage
+\State \Return $G_\phi$
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

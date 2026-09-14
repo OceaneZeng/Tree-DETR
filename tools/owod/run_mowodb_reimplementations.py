@@ -26,7 +26,10 @@ from tools.owod.run_stage1_diagnostics import training_environment
 
 
 METHODS = ("ow-detr", "prob", "owobj", "cat", "ew-detr")
-DEFAULT_METHODS = ("ow-detr", "prob", "owobj", "cat")
+# OW-DETR already has a completed four-stage result in this project. Keep it
+# available only as an explicit compatibility option; the requested internal
+# queue contains the three missing comparison arms.
+DEFAULT_METHODS = ("prob", "owobj", "cat")
 DEFAULT_MANIFEST = ROOT / "data/coco-owod/m-owodb/split_manifest.json"
 DEFAULT_COCO = ROOT / "data/coco"
 DEFAULT_PROPOSALS = ROOT / "data/derived/m-owodb-cat/selective_search.sqlite3"
@@ -49,6 +52,34 @@ def selected_methods(values):
 
 def state_directory(output_dir, methods):
     return output_dir if len(methods) > 1 else output_dir / methods[0]
+
+
+def load_reference_configs(path):
+    """Load old OW-DETR configs as shared settings for new methods."""
+    if path is None:
+        return {}, {}
+    stage0_path = Path(path).resolve()
+    if not stage0_path.is_file():
+        raise FileNotFoundError(f"Reference config is missing: {stage0_path}")
+    stage0 = read_json(stage0_path)
+    stage1_path = stage0_path.parent.parent / "stage_1" / "run_config.json"
+    stage1 = read_json(stage1_path) if stage1_path.is_file() else stage0
+    keys = ("backbone", "enc_layers", "dec_layers", "hidden_dim", "dim_feedforward",
+            "num_feature_levels", "nheads", "enc_n_points", "dec_n_points", "dropout",
+            "batch_size", "seed", "lr", "weight_decay", "position_embedding",
+            "position_embedding_scale", "clip_max_norm", "class_embed_lr_mult",
+            "lr_linear_proj_mult", "set_cost_class", "set_cost_bbox", "set_cost_giou",
+            "cls_loss_coef", "bbox_loss_coef", "giou_loss_coef", "focal_alpha",
+            "eval_interval", "num_workers", "unknown_threshold")
+    shared = {key: stage0[key] for key in keys if key in stage0}
+    if stage0.get("lr_backbone", 0) != 0:
+        raise ValueError("Reference OW-DETR recipe must use lr_backbone=0")
+    shared.update(stage0_epochs=stage0.get("epochs", 50), stage0_lr_drop=stage0.get("lr_drop", 40),
+                  incremental_epochs=stage1.get("epochs", 20), incremental_lr_drop=stage1.get("lr_drop", 15))
+    paths = {"stage0": str(stage0_path)}
+    if stage1_path.is_file():
+        paths["stage1"] = str(stage1_path)
+    return shared, paths
 
 
 def validate_cuda_runtime(environment):
@@ -85,7 +116,12 @@ def create_plan(args):
     if len(args.gpus.split(",")) != 2 or len(set(args.gpus.split(","))) != 2:
         raise ValueError("This comparison requires two distinct GPU indices")
 
+    reference, reference_paths = load_reference_configs(args.reference_config)
     fingerprints = {str(manifest_path): file_sha256(manifest_path)}
+    for path in reference_paths.values():
+        fingerprints[path] = file_sha256(Path(path))
+    shared = vars(args).copy()
+    shared.update(reference)
     proposal_path = args.cat_proposals.resolve()
     if "cat" in methods_to_run:
         if not proposal_path.is_file():
@@ -145,8 +181,8 @@ def create_plan(args):
             payload = (cat_train if method in ("ow-detr", "cat", "prob", "owobj") else annotation_subset(
                 increment, [image["id"] for image in increment["images"]],
                 current_classes))
-            epochs = args.stage0_epochs if stage == 0 else args.incremental_epochs
-            lr_drop = args.stage0_lr_drop if stage == 0 else args.incremental_lr_drop
+            epochs = shared["stage0_epochs"] if stage == 0 else shared["incremental_epochs"]
+            lr_drop = shared["stage0_lr_drop"] if stage == 0 else shared["incremental_lr_drop"]
             command = [
                 sys.executable, "-m", "torch.distributed.run", "--nnodes=1",
                 "--nproc_per_node=2", "--master_addr=127.0.0.1",
@@ -155,13 +191,25 @@ def create_plan(args):
                 "--train-ann", str(annotation), "--val-ann", str(files["full_val"]),
                 "--output_dir", str(directory), "--owod-manifest", str(manifest_path),
                 "--owod-stage", str(stage), "--num_classes", "92", "--lr_backbone", "0",
-                "--lr", str(args.lr), "--weight_decay", str(args.weight_decay),
+                "--lr", str(shared["lr"]), "--weight_decay", str(shared["weight_decay"]),
                 "--epochs", str(epochs), "--lr_drop", str(lr_drop),
-                "--batch_size", str(args.batch_size), "--num_workers", str(args.num_workers),
-                "--seed", str(args.seed), "--num_queries", str(args.num_queries),
-                "--enc_layers", str(args.enc_layers), "--dec_layers", str(args.dec_layers),
-                "--unknown-threshold", str(args.unknown_threshold),
-                "--eval_interval", str(args.eval_interval), "--no-file-log",
+                "--batch_size", str(shared["batch_size"]), "--num_workers", str(shared["num_workers"]),
+                "--seed", str(shared["seed"]), "--num_queries", str(shared["num_queries"]),
+                "--enc_layers", str(shared["enc_layers"]), "--dec_layers", str(shared["dec_layers"]),
+                "--hidden_dim", str(shared["hidden_dim"]), "--dim_feedforward", str(shared["dim_feedforward"]),
+                "--num_feature_levels", str(shared["num_feature_levels"]), "--nheads", str(shared["nheads"]),
+                "--enc_n_points", str(shared["enc_n_points"]), "--dec_n_points", str(shared["dec_n_points"]),
+                "--dropout", str(shared["dropout"]), "--backbone", str(shared["backbone"]),
+                "--position_embedding", str(shared["position_embedding"]),
+                "--position_embedding_scale", str(shared["position_embedding_scale"]),
+                "--clip_max_norm", str(shared["clip_max_norm"]),
+                "--class_embed_lr_mult", str(shared["class_embed_lr_mult"]),
+                "--lr_linear_proj_mult", str(shared["lr_linear_proj_mult"]),
+                "--set_cost_class", str(shared["set_cost_class"]), "--set_cost_bbox", str(shared["set_cost_bbox"]),
+                "--set_cost_giou", str(shared["set_cost_giou"]), "--cls_loss_coef", str(shared["cls_loss_coef"]),
+                "--bbox_loss_coef", str(shared["bbox_loss_coef"]), "--giou_loss_coef", str(shared["giou_loss_coef"]),
+                "--focal_alpha", str(shared["focal_alpha"]), "--unknown-threshold", str(shared["unknown_threshold"]),
+                "--eval_interval", str(shared["eval_interval"]), "--no-file-log",
                 "--print-freq", "100", "--eval-print-freq", "100",
                 "--ow-pseudo-warmup", str(args.pseudo_warmup),
                 "--ow-top-unknown", str(args.top_unknown),
@@ -211,7 +259,7 @@ def create_plan(args):
                 "epochs": epochs,
             }
         memory = select_memory(cat_train, known_classes, args.memory_images,
-                               args.seed + stage)
+                               shared["seed"] + stage)
         previous_classes = known_classes
         previous_samples += len(increment["images"])
 
@@ -243,6 +291,7 @@ def create_plan(args):
             "cat_selective_search": "OpenCV cache; configuration recorded in proposal database",
             "cat_replay": "bounded replay images are mixed into training batches",
             "ew_protocol_transfer": "EWOD method transferred to static-domain M-OWODB",
+            "reference_recipe": reference_paths or "runner defaults",
         },
         "fingerprints": fingerprints,
         "runs": {key: {field: value for field, value in run.items()
@@ -256,6 +305,8 @@ def main(argv=None):
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--coco-path", type=Path, default=DEFAULT_COCO)
     parser.add_argument("--cat-proposals", type=Path, default=DEFAULT_PROPOSALS)
+    parser.add_argument("--reference-config", type=Path, default=None,
+                        help="Old OW-DETR stage_0/run_config.json used as shared recipe")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(DEFAULT_METHODS))
     parser.add_argument("--gpus", default="0,1")

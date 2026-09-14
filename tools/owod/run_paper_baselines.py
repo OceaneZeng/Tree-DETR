@@ -377,6 +377,10 @@ def summarize(output_dir, methods=DEFAULT_METHODS):
             merged = directory / 'consolidated_metrics.json'
             if method == 'ew-detr' and merged.is_file():
                 rows.append((read_json(merged), 'consolidated'))
+            if not rows:
+                status = 'missing_directory' if not directory.is_dir() else f'{status}:no_metrics'
+                print(method, stage, '-', '-', 'NA', 'NA', 'NA', 'NA', 'NA', status)
+                continue
             for row, weights in rows:
                 values = [f"{100 * row['test_owod_' + key]:.3f}" if 'test_owod_' + key in row else 'NA'
                           for key in ('previous_ap50', 'current_ap50', 'known_ap50', 'u_recall', 'h_score')]

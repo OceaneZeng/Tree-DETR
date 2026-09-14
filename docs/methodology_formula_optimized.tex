@@ -1,0 +1,297 @@
+\subsection{Class-Interference GNN}
+\label{sec:class_interference_gnn}
+
+Learning a new category can affect old categories unevenly.
+Uniform replay does not distinguish an old category that is highly vulnerable
+from one that is largely unaffected. We therefore construct a directed class
+graph to estimate the interference caused by an incremental update.
+
+For each category $c$, let $\mathcal{M}_c$ denote the Hungarian-matched
+query--target pairs whose target category is $c$. Its category-conditioned
+detection loss is defined as
+\begin{equation}
+\mathcal{L}_c
+=\frac{1}{\max(1,|\mathcal{M}_c|)}
+\sum_{(q,b)\in\mathcal{M}_c}
+\left[
+\lambda_{\mathrm{cls}}\ell_{\mathrm{cls}}(\hat{p}_q,c)
++\lambda_1\|\hat{b}_q-b\|_1
++\lambda_{\mathrm{giou}}\ell_{\mathrm{giou}}(\hat{b}_q,b)
+\right],
+\label{eq:category_detection_loss}
+\end{equation}
+where $\hat{p}_q$ and $\hat{b}_q$ are the class prediction and predicted box
+of query $q$, respectively, and $b$ is its matched ground-truth box.
+The terms $\ell_{\mathrm{cls}}$ and $\ell_{\mathrm{giou}}$ denote the
+classification and generalized-IoU losses, and the $\lambda$ coefficients
+are the corresponding detection-loss weights.
+We compute the gradient of this loss with respect to the target decoder FFN
+parameters as $G_c=\partial\mathcal{L}_c/\partial\Theta_{\mathrm{FFN},t}$
+and vectorize it as $g_c=\operatorname{vec}(G_c)$, where
+$\Theta_{\mathrm{FFN},t}$ denotes the FFN parameters selected for adaptation
+at stage $t$. The resulting gradient is compressed and normalized to obtain a
+fixed-dimensional node feature $x_c$. Each category is represented by one node,
+and an ordered pair of nodes represents a possible directed interference edge.
+
+To construct supervision for the graph, we perform a small probe update using
+the gradient of the newly introduced category $u$, yielding
+$\Theta_{\mathrm{FFN},t,u}^{\mathrm{probe}}
+=\Theta_{\mathrm{FFN},t}-\eta\,\bar{G}_u$,
+where $\bar{G}_u$ is the normalized gradient reshaped to match the target
+FFN parameters and $\eta$ is a small probe step size. The empirical harm
+from category $u$ to an old category $c$ is measured by the decrease in its
+validation AP:
+\begin{equation}
+H_{u\rightarrow c}
+=\left[\operatorname{AP}_{c}(f_{\theta_t})
+-\operatorname{AP}_{c}(f_{\theta_{t,u}^{\mathrm{probe}}})\right]_{+},
+\label{eq:empirical_harm}
+\end{equation}
+where $\theta_t$ is the detector before the probe update and
+$\theta_{t,u}^{\mathrm{probe}}$ is the detector obtained after replacing the
+target FFN parameters with $\Theta_{\mathrm{FFN},t,u}^{\mathrm{probe}}$.
+The notation $[x]_{+}=\max(x,0)$ keeps only positive AP degradation.
+
+The GNN receives the class-level gradient features and performs message passing
+between category nodes. At layer $l$, the representation of category $i$ is
+updated as
+\begin{equation}
+\begin{aligned}
+h_i^{(l+1)}=h_i^{(l)}+\Phi_l\Bigl(
+h_i^{(l)},\sum_{j\neq i}a_{j\rightarrow i}^{(l)}
+\Psi_l\bigl([h_j^{(l)},h_i^{(l)},h_j^{(l)}-h_i^{(l)}]\bigr)
+\Bigr),
+\end{aligned}
+\label{eq:gnn_message_passing}
+\end{equation}
+where $h_i^{(0)}$ is obtained from $x_i$ and $a_{j\rightarrow i}^{(l)}$
+is a learned normalized coefficient for the directed edge from category $j$
+to category $i$. The edge representation contains the source node, the target
+node, and their difference, allowing the graph to model asymmetric interference.
+
+After the final message-passing layer, the GNN predicts the interference
+probability from source category $i$ to target category $j$:
+\begin{equation}
+p_{i\rightarrow j}
+=\sigma\left(\Psi_{\mathrm{edge}}\left(
+[h_i^{(L)},h_j^{(L)},h_i^{(L)}-h_j^{(L)}]
+\right)\right).
+\label{eq:edge_prediction}
+\end{equation}
+
+The GNN is trained using interference artifacts collected from previously
+completed incremental stages. Let $\mathcal{E}_{\mathrm{hist}}$ denote the
+measured directed edges in these artifacts. The measured harm values in
+Eq.~\ref{eq:empirical_harm} are normalized within each source category as
+$\widetilde{H}_{u\rightarrow c}
+=H_{u\rightarrow c}/\max(\epsilon,\max_v H_{u\rightarrow v})$,
+where the maximum is taken over measured targets in the same artifact and
+$\epsilon>0$ prevents division by zero. Let $r_{i\rightarrow j}$ denote
+the edge logit before the sigmoid in Eq.~\ref{eq:edge_prediction}, and let
+$\mathcal{Q}_{\mathrm{hist}}$ contain within-artifact triplets
+$(u,c^+,c^-)$ satisfying $H_{u\rightarrow c^+}>H_{u\rightarrow c^-}$.
+The GNN is optimized with
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\mathrm{GNN}}
+={}&\frac{1}{|\mathcal{E}_{\mathrm{hist}}|}
+\sum_{(u,c)\in\mathcal{E}_{\mathrm{hist}}}
+\operatorname{SmoothL1}\left(p_{u\rightarrow c},
+\widetilde{H}_{u\rightarrow c}\right)\\
+&+\frac{\lambda_{\mathrm{rank}}}{\max(1,|\mathcal{Q}_{\mathrm{hist}}|)}
+\sum_{(u,c^+,c^-)\in\mathcal{Q}_{\mathrm{hist}}}
+\left[m_{\mathrm{rank}}-r_{u\rightarrow c^+}
++r_{u\rightarrow c^-}\right]_{+},
+\end{aligned}
+\label{eq:gnn_loss}
+\end{equation}
+where the regression term fits the normalized harm values, while the pairwise
+ranking term encourages categories with larger measured AP degradation to
+receive larger edge scores. The hyperparameters $\lambda_{\mathrm{rank}}$
+and $m_{\mathrm{rank}}$ control the ranking weight and margin, respectively.
+The GNN parameters are updated by minimizing $\mathcal{L}_{\mathrm{GNN}}$.
+The current stage is not used to train its own neighborhood predictor; its
+measured interference is stored for later graph training.
+
+At task $T_{t+1}$, the GNN predicts an interference score $p_{u\rightarrow c}$
+for every ordered pair $(u,c)\in K_{t+1}\times\mathcal{K}_t$.
+Because multiple new categories are introduced simultaneously, we aggregate
+their predicted effects on each old category as
+$s_{t+1}(c)=\max_{u\in K_{t+1}}p_{u\rightarrow c}$ for
+$c\in\mathcal{K}_t$. The maximum operator treats an old category as vulnerable
+if it is strongly affected by any category introduced at the current task.
+The old categories with the largest aggregated interference scores form the
+task-level neighborhood:
+\begin{equation}
+\mathcal{N}_{t+1}
+=\operatorname{TopK}_{c\in\mathcal{K}_t}s_{t+1}(c).
+\label{eq:interference_neighborhood}
+\end{equation}
+The selected $\mathcal{N}_{t+1}$ is used to determine how historical replay
+samples are allocated and which old categories receive local protection during
+the incremental update.
+
+% Preamble: \usepackage{algorithm,algpseudocode}
+\begin{algorithm}[t]
+\caption{Training the Class-Interference GNN}
+\label{alg:gnn_training}
+\begin{algorithmic}[1]
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+\Require Completed historical stages $\mathcal{S}_{\mathrm{hist}}$ with
+pre-update detectors, class data, and validation data; GNN parameters $\phi$;
+probe step size $\eta$; GNN learning rate $\eta_g$; training epochs $E$
+\Ensure Trained class-interference GNN $G_\phi$
+\State Initialize the historical artifact set $\mathcal{A}\gets\emptyset$
+\For{each stage $s\in\mathcal{S}_{\mathrm{hist}}$}
+    \State Load its pre-update detector $f_{\theta_s}$
+    \For{each category $c$ observed at stage $s$}
+        \State Compute $\mathcal{L}_c$ using Eq.~\ref{eq:category_detection_loss}
+        \State Compute $g_c\gets\operatorname{vec}(\nabla_{\Theta_{\mathrm{FFN},s}}\mathcal{L}_c)$
+        \State Compress and normalize $g_c$ to obtain node feature $x_c$
+    \EndFor
+    \For{each newly introduced category $u$ at stage $s$}
+        \State Apply a temporary probe:
+        $\Theta_{\mathrm{FFN},s,u}^{\mathrm{probe}}
+        \gets\Theta_{\mathrm{FFN},s}-\eta\bar{G}_u$
+        \State Measure $H_{u\rightarrow c}$ for each old category $c$
+        using Eq.~\ref{eq:empirical_harm}
+        \State Restore the pre-update detector $f_{\theta_s}$
+    \EndFor
+    \State Store the node features and measured harm in $\mathcal{A}$
+\EndFor
+\For{$e=1,\ldots,E$}
+    \For{each historical artifact in $\mathcal{A}$}
+        \State Predict $p_{u\rightarrow c}$ using
+        Eqs.~\ref{eq:gnn_message_passing} and~\ref{eq:edge_prediction}
+        \State Compute $\mathcal{L}_{\mathrm{GNN}}$ using Eq.~\ref{eq:gnn_loss}
+        \State Update $\phi\gets\phi-\eta_g\nabla_\phi\mathcal{L}_{\mathrm{GNN}}$
+    \EndFor
+\EndFor
+\State Freeze $G_\phi$ for neighborhood prediction at the current stage
+\State \Return $G_\phi$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Graph-Guided Detector Adaptation}
+\label{sec:graph_guided_detector_adaptation}
+
+Updating the complete detector during an incremental stage can alter
+representations that are unrelated to the new category. We therefore use the
+predicted neighborhood $\mathcal{N}_u$ to determine which detector parameters
+are exposed to the incremental update and which parameter directions remain
+protected.
+
+Let $\Theta_t$ denote the detector parameters after stage $T_t$ and let
+$\mathcal{P}(\mathcal{N}_u)$ be the parameter subset selected by the graph for
+the neighborhood of $u$. The graph-guided update is written as
+\begin{equation}
+\widetilde{\Theta}_t=\Theta_t+\Delta\Theta_{\mathcal{N}_u},
+\qquad
+\operatorname{supp}(\Delta\Theta_{\mathcal{N}_u})
+\subseteq\mathcal{P}(\mathcal{N}_u),
+\label{eq:graph_guided_update}
+\end{equation}
+where $\Delta\Theta_{\mathcal{N}_u}$ is the update induced by the current
+stage objective and $\operatorname{supp}(\cdot)$ denotes the parameter entries
+that receive nonzero updates. The selection is made at the detector level and
+does not require a separate parameter bank for each category.
+
+Parameters outside $\mathcal{P}(\mathcal{N}_u)$ are protected during the
+incremental step, while parameters selected for the neighborhood receive
+gradients from the new-category and replay supervision. This class-conditioned
+parameter routing prevents the update from treating every old category as
+equally vulnerable.
+
+The selected detector parameters are optimized using the labeled data for the
+new category, historical replay data from the predicted neighborhood, and
+high-confidence predictions of the frozen detector. Let $\mathcal{D}_u$ denote
+the labeled data for the new category. Teacher completion produces
+$\widetilde{\mathcal{D}}_u
+=\mathcal{D}_u\cup\widehat{\mathcal{D}}_{\mathrm{old}}(\mathcal{D}_u)$,
+where $\widehat{\mathcal{D}}_{\mathrm{old}}$ contains high-confidence
+predictions of old objects generated by the frozen detector. This operation
+prevents old foreground objects that are absent from the current annotations
+from being treated as background.
+
+Replay is sampled from historical images containing categories in
+$\mathcal{N}_u$. The replay budget is fixed across methods, while the graph
+determines how that budget is distributed over old categories. This gives the
+selected parameters access to examples that are most relevant to the predicted
+interference pattern.
+
+After the incremental optimization described in
+Section~\ref{sec:graph_conditioned_objective}, the selected update is applied
+to obtain the detector for the next stage as
+$\Theta_{t+1}=\Theta_t+\Delta\Theta_{\mathcal{N}_u}$.
+The resulting detector is used as the base model for the next incremental
+stage, while the graph is updated with the observed class-level interference.
+
+\subsection{Graph-Conditioned Continual Objective}
+\label{sec:graph_conditioned_objective}
+
+The incremental detector is optimized with the standard DETR detection loss
+and two graph-conditioned regularization terms. The detection loss is
+computed on the teacher-completed current data and the replay set selected
+from the predicted neighborhood as
+$\mathcal{L}_{\mathrm{det}}
+=\mathcal{L}_{\mathrm{DET}}(\widetilde{\mathcal{D}}_u
+\cup\mathcal{R}(\mathcal{N}_u))$,
+where $\mathcal{R}(\mathcal{N}_u)$ denotes the historical replay set restricted
+to categories in $\mathcal{N}_u$.
+
+The first additional term improves discrimination between the new category and
+the old categories in its predicted neighborhood. For a matched query $q$
+with target category $y$, the correct category logit is required to exceed the
+strongest competing local category by a margin $m$:
+\begin{equation}
+\mathcal{L}_{\mathrm{local}}
+=\frac{1}{|\mathcal{M}|}
+\sum_{(q,y)\in\mathcal{M}}
+\left[m-\left(z_{q,y}
+-\max_{\substack{c\in\mathcal{N}_u\cup\{u\}\\c\neq y}}
+z_{q,c}\right)\right]_{+},
+\label{eq:local_margin}
+\end{equation}
+where $\mathcal{M}$ contains matched queries whose target categories belong to
+$\mathcal{N}_u\cup\{u\}$. This term focuses on local class competition and
+does not impose an artificial margin between every pair of categories.
+
+The graph-guided update may still overlap with parameter directions that are
+important for categories outside $\mathcal{N}_u$. We therefore construct an
+orthonormal basis $U_{\mathrm{off}}$ from the class-conditioned gradients of
+non-neighborhood categories. Let
+$\delta=\operatorname{vec}(\Delta\Theta_{\mathcal{N}_u})$
+denote the vectorized graph-guided update, where updates from all selected
+parameter groups are concatenated when necessary. The off-neighborhood
+protection term is defined as
+\begin{equation}
+\mathcal{L}_{\mathrm{off}}
+=\left\|U_{\mathrm{off}}^{\top}\delta\right\|_2^2.
+\label{eq:off_neighborhood}
+\end{equation}
+
+The complete incremental objective is
+\begin{equation}
+\mathcal{L}_{\mathrm{total}}
+=\mathcal{L}_{\mathrm{det}}
++\lambda_{\mathrm{local}}\mathcal{L}_{\mathrm{local}}
++\lambda_{\mathrm{off}}\mathcal{L}_{\mathrm{off}}.
+\label{eq:total_objective}
+\end{equation}
+
+The four protection mechanisms are integrated into this objective and its data
+construction. First, graph-guided parameter routing confines learning to the
+selected detector parameters. Second, teacher completion preserves old
+foreground objects that are not annotated in the current incremental data.
+Third, neighborhood replay revisits historical examples from categories
+predicted to be at risk. Finally, off-neighborhood projection restricts the
+update from overlapping with directions associated with categories outside
+the predicted neighborhood.
+
+The local margin term is not an independent forgetting protection. It improves
+the separation between the new category and the old categories that are most
+likely to compete with it. After the objective is optimized, the graph-guided
+update is applied as described in
+Section~\ref{sec:graph_guided_detector_adaptation}, and the resulting detector
+is passed to the next incremental stage.

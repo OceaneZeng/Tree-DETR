@@ -13,7 +13,7 @@ from models.paper_baselines.cat_modules import AdaptivePseudoLabeler, cat_pseudo
 from models.paper_baselines.detector import PaperCriterion
 from models.deformable_detr import SetCriterion
 from models.matcher import HungarianMatcher
-from tools.owod.run_mowodb_reimplementations import state_directory
+from tools.owod.run_mowodb_reimplementations import DEFAULT_METHODS, state_directory
 
 
 def test_adaptive_controller_updates_normalized_weights_and_round_trips_state():
@@ -100,6 +100,10 @@ def test_single_method_plans_do_not_overwrite_each_other(tmp_path):
     assert state_directory(tmp_path, ("cat",)) == tmp_path / "cat"
     assert state_directory(tmp_path, ("ew-detr",)) == tmp_path / "ew-detr"
     assert state_directory(tmp_path, ("cat", "ew-detr")) == tmp_path
+
+
+def test_default_internal_queue_excludes_completed_ow_detr():
+    assert DEFAULT_METHODS == ("prob", "owobj", "cat")
 
 
 def test_cat_validation_neither_requires_proposals_nor_updates_controller():
