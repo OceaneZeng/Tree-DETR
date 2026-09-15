@@ -141,6 +141,8 @@ def get_args_parser():
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
+    parser.add_argument('--no-pretrained-backbone', action='store_true',
+                        help='initialize the backbone randomly')
     parser.add_argument('--num_classes', default=None, type=int,
                         help='Override the class count for a remapped lightweight dataset')
     parser.add_argument('--dilation', action='store_true',

@@ -99,11 +99,12 @@ class Backbone(BackboneBase):
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
-                 dilation: bool):
+                 dilation: bool,
+                 no_pretrained: bool = False):
         norm_layer = FrozenBatchNorm2d
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=norm_layer)
+            pretrained=(is_main_process() and not no_pretrained), norm_layer=norm_layer)
         channels_by_backbone = {
             'resnet18': [128, 256, 512],
             'resnet34': [128, 256, 512],
@@ -142,6 +143,7 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation,
+                        getattr(args, 'no_pretrained_backbone', False))
     model = Joiner(backbone, position_embedding)
     return model

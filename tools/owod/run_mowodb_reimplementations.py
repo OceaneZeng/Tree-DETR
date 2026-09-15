@@ -120,7 +120,7 @@ def create_plan(args):
     fingerprints = {str(manifest_path): file_sha256(manifest_path)}
     for path in reference_paths.values():
         fingerprints[path] = file_sha256(Path(path))
-    shared = vars(args).copy()
+    shared = vars(args).copy()\n    for _key, _value in {"backbone":"resnet50","hidden_dim":256,"dim_feedforward":1024,"num_feature_levels":4,"nheads":8,"enc_n_points":4,"dec_n_points":4,"dropout":0.1,"position_embedding":"sine","position_embedding_scale":6.283185307179586,"clip_max_norm":0.1,"class_embed_lr_mult":1.0,"lr_linear_proj_mult":0.1,"set_cost_class":2,"set_cost_bbox":5,"set_cost_giou":2,"cls_loss_coef":2,"bbox_loss_coef":5,"giou_loss_coef":2,"focal_alpha":0.25,"eval_interval":1,"unknown_threshold":0.5}.items():\n        shared.setdefault(_key, _value)
     shared.update(reference)
     proposal_path = args.cat_proposals.resolve()
     if "cat" in methods_to_run:
@@ -190,7 +190,7 @@ def create_plan(args):
                 "--paper-baseline", method, "--coco_path", str(coco_path),
                 "--train-ann", str(annotation), "--val-ann", str(files["full_val"]),
                 "--output_dir", str(directory), "--owod-manifest", str(manifest_path),
-                "--owod-stage", str(stage), "--num_classes", "92", "--lr_backbone", "0",
+                "--owod-stage", str(stage), "--num_classes", "92", "--lr_backbone", str(args.lr_backbone),
                 "--lr", str(shared["lr"]), "--weight_decay", str(shared["weight_decay"]),
                 "--epochs", str(epochs), "--lr_drop", str(lr_drop),
                 "--batch_size", str(shared["batch_size"]), "--num_workers", str(shared["num_workers"]),
@@ -209,7 +209,7 @@ def create_plan(args):
                 "--set_cost_giou", str(shared["set_cost_giou"]), "--cls_loss_coef", str(shared["cls_loss_coef"]),
                 "--bbox_loss_coef", str(shared["bbox_loss_coef"]), "--giou_loss_coef", str(shared["giou_loss_coef"]),
                 "--focal_alpha", str(shared["focal_alpha"]), "--unknown-threshold", str(shared["unknown_threshold"]),
-                "--eval_interval", str(shared["eval_interval"]), "--no-file-log",
+                "--eval_interval", str(shared["eval_interval"]), "--no-file-log", "--no-pretrained-backbone",
                 "--print-freq", "100", "--eval-print-freq", "100",
                 "--ow-pseudo-warmup", str(args.pseudo_warmup),
                 "--ow-top-unknown", str(args.top_unknown),
@@ -319,7 +319,7 @@ def main(argv=None):
     parser.add_argument("--incremental-lr-drop", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)\n    parser.add_argument("--lr-backbone", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     # Match the repository's Tree-DETR/OWOD recipe rather than CAT's
@@ -422,3 +422,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
