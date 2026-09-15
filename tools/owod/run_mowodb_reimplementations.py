@@ -120,7 +120,19 @@ def create_plan(args):
     fingerprints = {str(manifest_path): file_sha256(manifest_path)}
     for path in reference_paths.values():
         fingerprints[path] = file_sha256(Path(path))
-    shared = vars(args).copy()\n    for _key, _value in {"backbone":"resnet50","hidden_dim":256,"dim_feedforward":1024,"num_feature_levels":4,"nheads":8,"enc_n_points":4,"dec_n_points":4,"dropout":0.1,"position_embedding":"sine","position_embedding_scale":6.283185307179586,"clip_max_norm":0.1,"class_embed_lr_mult":1.0,"lr_linear_proj_mult":0.1,"set_cost_class":2,"set_cost_bbox":5,"set_cost_giou":2,"cls_loss_coef":2,"bbox_loss_coef":5,"giou_loss_coef":2,"focal_alpha":0.25,"eval_interval":1,"unknown_threshold":0.5}.items():\n        shared.setdefault(_key, _value)
+    shared = vars(args).copy()
+    for _key, _value in {"backbone": "resnet50", "hidden_dim": 256,
+                         "dim_feedforward": 1024, "num_feature_levels": 4,
+                         "nheads": 8, "enc_n_points": 4, "dec_n_points": 4,
+                         "dropout": 0.1, "position_embedding": "sine",
+                         "position_embedding_scale": 6.283185307179586,
+                         "clip_max_norm": 0.1, "class_embed_lr_mult": 1.0,
+                         "lr_linear_proj_mult": 0.1, "set_cost_class": 2,
+                         "set_cost_bbox": 5, "set_cost_giou": 2,
+                         "cls_loss_coef": 2, "bbox_loss_coef": 5,
+                         "giou_loss_coef": 2, "focal_alpha": 0.25,
+                         "eval_interval": 1, "unknown_threshold": 0.5}.items():
+        shared.setdefault(_key, _value)
     shared.update(reference)
     proposal_path = args.cat_proposals.resolve()
     if "cat" in methods_to_run:
@@ -319,7 +331,8 @@ def main(argv=None):
     parser.add_argument("--incremental-lr-drop", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=2e-4)\n    parser.add_argument("--lr-backbone", type=float, default=2e-5)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr-backbone", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     # Match the repository's Tree-DETR/OWOD recipe rather than CAT's
