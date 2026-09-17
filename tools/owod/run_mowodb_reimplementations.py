@@ -115,6 +115,8 @@ def create_plan(args):
         raise ValueError("M-OWODB requires exactly four stages")
     if len(args.gpus.split(",")) != 2 or len(set(args.gpus.split(","))) != 2:
         raise ValueError("This comparison requires two distinct GPU indices")
+    if args.lr_backbone <= 0:
+        raise ValueError("Scratch paper baselines require --lr-backbone > 0")
 
     reference, reference_paths = load_reference_configs(args.reference_config)
     fingerprints = {str(manifest_path): file_sha256(manifest_path)}
@@ -297,7 +299,7 @@ def create_plan(args):
         "stage_records": stage_records,
         "assumptions": {
             "shared_schedule": "50 epochs stage 0; 20 epochs stages 1-3 by default",
-            "initialization": "repository ImageNet ResNet-50; no future-class detector weights",
+            "initialization": "randomly initialized ResNet-50; no external checkpoint; trainable backbone",
             "optimizer": "AdamW with explicit shared learning rate and weight decay",
             "cat_controller": "paper omits controller hyperparameters; explicit CLI values recorded",
             "cat_selective_search": "OpenCV cache; configuration recorded in proposal database",
@@ -332,7 +334,7 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--lr-backbone", type=float, default=2e-5)
+    parser.add_argument("--lr-backbone", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     # Match the repository's Tree-DETR/OWOD recipe rather than CAT's

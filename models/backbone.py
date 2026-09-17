@@ -67,10 +67,13 @@ class FrozenBatchNorm2d(torch.nn.Module):
 class BackboneBase(nn.Module):
 
     def __init__(self, backbone: nn.Module, train_backbone: bool,
-                 return_interm_layers: bool, num_channels):
+                 return_interm_layers: bool, num_channels,
+                 train_all_backbone: bool = False):
         super().__init__()
         for name, parameter in backbone.named_parameters():
-            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+            if (not train_backbone or
+                    (not train_all_backbone and
+                     'layer2' not in name and 'layer3' not in name and 'layer4' not in name)):
                 parameter.requires_grad_(False)
         if return_interm_layers:
             # return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
@@ -101,7 +104,9 @@ class Backbone(BackboneBase):
                  return_interm_layers: bool,
                  dilation: bool,
                  no_pretrained: bool = False):
-        norm_layer = FrozenBatchNorm2d
+        # Frozen ImageNet BN is appropriate for the pretrained detector path.
+        # A randomly initialized backbone needs trainable running statistics.
+        norm_layer = nn.BatchNorm2d if no_pretrained else FrozenBatchNorm2d
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
             pretrained=(is_main_process() and not no_pretrained), norm_layer=norm_layer)
@@ -114,7 +119,7 @@ class Backbone(BackboneBase):
         if name not in channels_by_backbone:
             raise ValueError(f'Unsupported ResNet backbone: {name}')
         super().__init__(backbone, train_backbone, return_interm_layers,
-                         channels_by_backbone[name])
+                         channels_by_backbone[name], train_all_backbone=no_pretrained)
         if dilation:
             self.strides[-1] = self.strides[-1] // 2
 
