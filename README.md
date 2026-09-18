@@ -4,6 +4,8 @@
 
 当前研究主线是 **D2：Deformable DETR 常规微调 + GNN 指导的旧类回放 + Stage 0 教师补标**。允许更新 ResNet backbone 的 `layer2/3/4`，浅层冻结；Encoder、Decoder、投影层和检测头正常训练。不再把 LoRA 或完全冻结 backbone 作为主方案。
 
+**新增（2026-09-18）：** [GLCA-DETR / Uniform Replay / Uniform Replay + teacher supervision 同设置对比](docs/replay-comparison-runbook.md)。支持逐 Task 共享初始化、等图片预算与回放曝光、三组重跑，以及 mAP@50、U-Rec、H-score、Previous/Current 的折线图和柱状图。默认从已有 D2 Stage 1 配置启动，`python tools/owod/run_replay_comparison.py --dry-run` 预检；训练结束自动汇总，也可 `--summarize` 单独绘图。代码已加入，真实实验结果待服务器运行。
+
 结果来源是截至上述日期用户提供的服务器汇总，以及仓库已有的历史日志分析。本文不是实时服务器监控：`incomplete` 表示最后一次收到的记录未完成，不等于此刻仍在训练。新脚本已经准备好，不代表对应训练已经执行。
 
 ## 1. 如何配置项目
@@ -310,6 +312,8 @@ nohup setsid python -u tools/owod/run_d2_followups.py --experiments long --resum
 | [run_graph_local_increment.py](tools/owod/run_graph_local_increment.py) | 构造图邻域与回放、启动增量学习 |
 | [run_stage1_diagnostics.py](tools/owod/run_stage1_diagnostics.py) | 历史 D1–D4 启动与 D0–D4 汇总 |
 | [run_d2_followups.py](tools/owod/run_d2_followups.py) | 当前 D2-long / Random-K 实验 |
+| [run_replay_comparison.py](tools/owod/run_replay_comparison.py) | GLCA / Uniform / Uniform + teacher 三组同设置实验 |
+| [plot_replay_comparison.py](tools/owod/plot_replay_comparison.py) | 配对 epoch/seed 汇总和 PNG/SVG 对比图 |
 | [run_paper_baselines.py](tools/owod/run_paper_baselines.py) | 历史 D4 配置的 OW-DETR / EW-DETR 队列 |
 | [models/owod_metrics.py](models/owod_metrics.py) | 当前内部 OWOD 指标 |
 | [baselines](baselines) | 固定版本的外部复现源码（不存放结果） |

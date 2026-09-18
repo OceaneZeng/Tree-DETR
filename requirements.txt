@@ -4,3 +4,5 @@ tqdm
 opencv-contrib-python-headless>=4.8,<5
 cython
 scipy
+# Matched replay comparison figures (PNG/SVG).
+matplotlib>=3.7
