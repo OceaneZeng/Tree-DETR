@@ -93,6 +93,11 @@ replay_comparison_v1/
 后者展示两组在同一 seed/epoch 的真实差值（百分点），纵轴以零为中心对称。
 所有五项指标及负差值均保留，不修改原始结果。不同线型和点形用于区分重叠曲线。
 
+三方法组合图为 `task_2_comparison_main.png/.svg`（Known mAP@50、U-Rec、H-score）
+和 `task_2_comparison_retention.png/.svg`（Previous、Current）。每行左侧为零起点的最终
+指标柱状图，右侧为明确标注局部纵轴的训练折线图。GLCA 使用较粗线条，柱上显示各方法
+真实数值；右图注明 GLCA 相对 Uniform + teacher 的真实最终差值，包含负值。
+
 所有训练完成后自动生成报告，也可随时单独执行：
 
 ```bash

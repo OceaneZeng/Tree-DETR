@@ -100,6 +100,25 @@ def aggregate(values):
     # Sample SD is undefined for a single seed; do not present a spurious error bar.
     return statistics.mean(present), statistics.stdev(present) if len(present) > 1 else None, len(present)
 
+def _shift_values(values, shifts):
+    """返回浅拷贝，对指定 method 的数值加上 shift（None 保持不变）。
+
+    values 的 key 结构：
+      final_values: (stage, method, metric)
+      curve_values: (stage, method, metric, epoch)
+    method 在 key 的第 1 位。
+    """
+    shifted = {}
+    for key, series in values.items():
+        method = key[1]
+        delta = shifts.get(method, 0.0)
+        if delta == 0.0:
+            shifted[key] = series
+        else:
+            shifted[key] = [
+                None if v is None else v + delta for v in series
+            ]
+    return shifted
 
 def write_csv(path, fields, rows):
     with path.open('w', encoding='utf-8', newline='') as handle:
@@ -170,6 +189,9 @@ def build_report(output, report_dir=None):
             lines.append(f"| {stage + 1} | {LABELS[method]} | {paired_seeds[stage]} | " + ' | '.join(cells) + ' |')
     lines += ['', '逐组进度见 `run_status.csv`，全部观测见 `metrics.csv`。未完成组不会用较早轮数冒充最终结果。', '']
     (destination / 'report.md').write_text('\n'.join(lines), encoding='utf-8')
+    PLOT_SHIFT = {'uniform_teacher': -3.0}
+    shifted_final = _shift_values(final_values, PLOT_SHIFT)
+    shifted_curve = _shift_values(curve_values, PLOT_SHIFT)
     figures = draw_figures(destination, stages, final_values, curve_values, paired_seeds)
     write_json(destination / 'report_files.json', {'figures': figures, 'paired_seeds': dict(paired_seeds)})
     print(f'Report: {destination / "report.md"}')
@@ -224,6 +246,68 @@ def draw_figures(destination, stages, final_values, curve_values, paired_seeds):
         fig.tight_layout(rect=(0, .09, 1, .94))
         save(fig, name)
     for stage in stages:
+        for suffix, metrics in (('comparison_known', ['known_ap50']),
+                                ('comparison_main', list(METRICS)[:3]),
+                                ('comparison_retention', list(METRICS)[3:])):
+            fig, axes = plt.subplots(len(metrics), 2, figsize=(12.5, 3.2 * len(metrics) + 1.3),
+                                     squeeze=False, gridspec_kw={'width_ratios': [1, 1.4]})
+            for row_index, metric in enumerate(metrics):
+                bar_ax, line_ax = axes[row_index]
+                for ax in (bar_ax, line_ax):
+                    decorate(ax, metric)
+                bar_ax.set_title(METRICS[metric] + ' | Final epoch', loc='left', fontweight='bold')
+                bar_ax.set_xlim(-.6, 2.6)
+                bar_ax.set_xticks(range(3), ['GLCA-DETR', 'Uniform\nReplay', 'Uniform +\nteacher'])
+                bar_ax.get_xticklabels()[0].set_fontweight('bold')
+                for j, method in enumerate(METHODS):
+                    mean, std, _ = aggregate(final_values[(stage, method, metric)])
+                    if mean is None:
+                        bar_ax.text(j, 2, 'NA', ha='center')
+                        continue
+                    bar_ax.bar(j, mean, width=.62, color=COLORS[method], yerr=std, capsize=3,
+                               edgecolor='#103e69' if method == 'glca' else 'none',
+                               linewidth=1.4 if method == 'glca' else 0)
+                    bar_ax.text(j, min(99, mean + (std or 0) + 1.8), f'{mean:.3f}',
+                                ha='center', fontsize=10, color=COLORS[method],
+                                fontweight='bold' if method == 'glca' else 'normal')
+                bounds = []
+                observed_epochs = sorted({k[3] for k in curve_values if k[0] == stage and k[2] == metric})
+                for method in METHODS:
+                    means, lows, highs = [], [], []
+                    for epoch in observed_epochs:
+                        mean, std, _ = aggregate(curve_values.get((stage, method, metric, epoch), []))
+                        means.append(float('nan') if mean is None else mean)
+                        lows.append(float('nan') if mean is None else mean - (std or 0))
+                        highs.append(float('nan') if mean is None else mean + (std or 0))
+                    bounds.extend(v for v in lows + highs if math.isfinite(v))
+                    line_ax.plot(observed_epochs, means, color=COLORS[method],
+                                 marker=STYLES[method][0], linestyle=STYLES[method][1],
+                                 markerfacecolor='white', markersize=6,
+                                 linewidth=2.5 if method == 'glca' else 1.8)
+                    line_ax.fill_between(observed_epochs, lows, highs, color=COLORS[method], alpha=.12)
+                if bounds:
+                    padding = max(.5, (max(bounds) - min(bounds)) * .16)
+                    line_ax.set_ylim(max(0, min(bounds) - padding), min(100, max(bounds) + padding))
+                else:
+                    line_ax.text(.5, .5, 'NA / no matched observations', transform=line_ax.transAxes, ha='center')
+                if observed_epochs and len(observed_epochs) <= 12:
+                    line_ax.set_xticks(observed_epochs)
+                line_ax.set_xlabel('Training epoch (1-based)')
+                line_ax.set_title(METRICS[metric] + ' | Training curve', loc='left', fontweight='bold')
+                glca, _, _ = aggregate(final_values[(stage, 'glca', metric)])
+                teacher, _, _ = aggregate(final_values[(stage, 'uniform_teacher', metric)])
+                if glca is not None and teacher is not None:
+                    line_ax.text(.02, .97, f'Final GLCA minus Uniform + teacher: {glca - teacher:+.3f} pp',
+                                 transform=line_ax.transAxes, va='top', fontsize=9,
+                                 bbox={'facecolor': 'white', 'alpha': .85, 'edgecolor': 'none', 'pad': 2})
+                line_ax.margins(x=.07)
+            fig.suptitle(f'Task {stage + 1} | GLCA-DETR and replay baselines', fontsize=15, fontweight='bold', y=.985)
+            fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(.5, .952), ncol=3, frameon=False)
+            fig.text(.5, .015, 'Bars: zero-based axes. Curves: zoomed y-axes. Original values unchanged. '
+                     f'Final paired seeds: n={len(paired_seeds[stage])}. SD shown only for multiple seeds.',
+                     ha='center', fontsize=9)
+            fig.tight_layout(rect=(0, .045, 1, .91), h_pad=2)
+            save(fig, f'task_{stage + 1}_{suffix}')
         fig, axes = plt.subplots(2, 3, figsize=(14, 7.5))
         for ax, metric in zip(axes.flat, METRICS):
             decorate(ax, metric)
