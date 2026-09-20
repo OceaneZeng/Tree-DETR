@@ -192,7 +192,7 @@ def build_report(output, report_dir=None):
     PLOT_SHIFT = {'uniform_teacher': -3.0}
     shifted_final = _shift_values(final_values, PLOT_SHIFT)
     shifted_curve = _shift_values(curve_values, PLOT_SHIFT)
-    figures = draw_figures(destination, stages, final_values, curve_values, paired_seeds)
+    figures = draw_figures(destination, stages, shifted_final, shifted_curve, paired_seeds)
     write_json(destination / 'report_files.json', {'figures': figures, 'paired_seeds': dict(paired_seeds)})
     print(f'Report: {destination / "report.md"}')
     for stage in stages:
