@@ -23,6 +23,7 @@ from tools.owod.run_stage1_diagnostics import file_hash, metric_rows
 METRICS = {'known_ap50': 'Known mAP@50 (%)', 'u_recall': 'U-Rec (%)', 'h_score': 'H-score (%)',
            'previous_ap50': 'Previous mAP@50 (%)', 'current_ap50': 'Current mAP@50 (%)'}
 COLORS = {'glca': '#1764ab', 'uniform': '#df8731', 'uniform_teacher': '#24856e'}
+STYLES = {'glca': ('o', '-'), 'uniform': ('^', ':'), 'uniform_teacher': ('s', '--')}
 SHORT_LABELS = {'glca': 'GLCA-DETR', 'uniform': 'Uniform Replay', 'uniform_teacher': 'Uniform Replay + teacher'}
 
 
@@ -187,7 +188,8 @@ def draw_figures(destination, stages, final_values, curve_values, paired_seeds):
         raise RuntimeError('Tables written. Plotting requires: python -m pip install matplotlib>=3.7') from error
     plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 10, 'axes.spines.top': False,
                          'axes.spines.right': False, 'svg.fonttype': 'none'})
-    handles = [Line2D([0], [0], color=COLORS[m], marker='o', label=SHORT_LABELS[m]) for m in METHODS]
+    handles = [Line2D([0], [0], color=COLORS[m], marker=STYLES[m][0],
+                      linestyle=STYLES[m][1], label=SHORT_LABELS[m]) for m in METHODS]
     files = []
 
     def save(fig, name):
@@ -236,7 +238,8 @@ def draw_figures(destination, stages, final_values, curve_values, paired_seeds):
                     highs.append(float('nan') if mean is None or std is None else mean + std)
                 if any(math.isfinite(v) for v in means):
                     any_points = True
-                    ax.plot(epochs, means, marker='o', markersize=4, linewidth=1.7, color=COLORS[method])
+                    ax.plot(epochs, means, marker=STYLES[method][0], linestyle=STYLES[method][1],
+                            markersize=5, linewidth=1.7, color=COLORS[method], markerfacecolor='white')
                     ax.fill_between(epochs, lows, highs, color=COLORS[method], alpha=.13)
             if not any_points:
                 ax.text(.5, .45, 'NA / no matched observations', transform=ax.transAxes, ha='center', color='#666666')
@@ -252,6 +255,81 @@ def draw_figures(destination, stages, final_values, curve_values, paired_seeds):
                      'Known mAP = AP50; bands = sample SD; unavailable metrics remain NA', fontsize=13)
         fig.tight_layout(rect=(0, 0, 1, .91))
         save(fig, f'task_{stage + 1}_curves')
+        for difference in (False, True):
+            fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+            for ax, metric in zip(axes.flat, METRICS):
+                decorate(ax, metric)
+                epochs = sorted({k[3] for k in curve_values if k[:3] == (stage, 'glca', metric)})
+                bounds = []
+                if difference:
+                    means, errors = [], []
+                    for epoch in epochs:
+                        left = curve_values.get((stage, 'glca', metric, epoch), [])
+                        right = curve_values.get((stage, 'uniform_teacher', metric, epoch), [])
+                        if len(left) != len(right):
+                            raise ValueError('Difference plots require paired seed observations')
+                        # Subtract within each seed before computing mean and sample SD.
+                        deltas = [a - b for a, b in zip(left, right) if a is not None and b is not None]
+                        mean, std, _ = aggregate(deltas)
+                        means.append(float('nan') if mean is None else mean)
+                        errors.append(std or 0)
+                    ax.axhline(0, color='#666666', linewidth=1, linestyle='--')
+                    ax.errorbar(epochs, means, yerr=errors, color=COLORS['glca'],
+                                marker='o', linewidth=1.7, capsize=3)
+                    for epoch, mean, error in zip(epochs, means, errors):
+                        if math.isfinite(mean):
+                            bounds.extend([mean - error, mean + error])
+                            ax.annotate(f'{mean:+.3f}', (epoch, mean), xytext=(0, 10 if mean >= 0 else -17),
+                                        textcoords='offset points', ha='center', fontsize=9)
+                    limit = max(.25, max((abs(b) for b in bounds), default=0) * 1.4)
+                    ax.set_ylim(-limit, limit)
+                    ax.set_title(METRICS[metric].replace('(%)', '(percentage points)'), loc='left', fontweight='bold')
+                else:
+                    for method in ('glca', 'uniform_teacher'):
+                        means, lows, highs = [], [], []
+                        for epoch in epochs:
+                            mean, std, _ = aggregate(curve_values.get((stage, method, metric, epoch), []))
+                            means.append(float('nan') if mean is None else mean)
+                            lows.append(float('nan') if mean is None else mean - (std or 0))
+                            highs.append(float('nan') if mean is None else mean + (std or 0))
+                        bounds.extend(v for v in lows + highs if math.isfinite(v))
+                        ax.plot(epochs, means, color=COLORS[method], marker=STYLES[method][0],
+                                linestyle=STYLES[method][1], markerfacecolor='white', markersize=6, linewidth=1.8)
+                        ax.fill_between(epochs, lows, highs, color=COLORS[method], alpha=.13)
+                    if bounds:
+                        padding = max(.5, (max(bounds) - min(bounds)) * .18)
+                        ax.set_ylim(max(0, min(bounds) - padding), min(100, max(bounds) + padding))
+                if not bounds:
+                    ax.text(.5, .5, 'NA / no matched observations', transform=ax.transAxes, ha='center', color='#666666')
+                ax.set_xlabel('Training epoch (1-based)')
+                if epochs and len(epochs) <= 12:
+                    ax.set_xticks(epochs)
+                else:
+                    ax.xaxis.get_major_locator().set_params(integer=True)
+                ax.margins(x=.14)
+            axes[1, 2].axis('off')
+            if difference:
+                axes[1, 2].text(.05, .65, 'GLCA minus Uniform Replay + teacher\n\n'
+                                'Positive: GLCA higher\nNegative: Uniform + teacher higher\n\n'
+                                'Paired seed differences; error bars = sample SD\n'
+                                'No error bars for a single seed\nAll five metrics shown; original values unchanged',
+                                transform=axes[1, 2].transAxes, va='top', linespacing=1.6, fontsize=10)
+                title = 'GLCA minus Uniform Replay + teacher (percentage points)'
+                subtitle = 'Symmetric per-panel axes around zero; paired seeds; original values unchanged'
+                suffix = 'teacher_difference'
+            else:
+                axes[1, 2].legend(handles=[handles[0], handles[2]], loc='upper left', frameon=False)
+                axes[1, 2].text(.05, .52, 'Zoomed per-panel y-axes (not zero-based)\n'
+                                'Read the numeric ticks when comparing gaps\n\n'
+                                'All five metrics shown; original values unchanged\n'
+                                'Bands = sample SD; single seed has no band',
+                                transform=axes[1, 2].transAxes, va='top', linespacing=1.6, fontsize=10)
+                title = 'GLCA vs Uniform Replay + teacher'
+                subtitle = 'Detail view: zoomed per-panel y-axes (not zero-based); original values unchanged'
+                suffix = 'teacher_detail'
+            fig.suptitle(f'Task {stage + 1} | {title}\n{subtitle}', fontsize=12)
+            fig.tight_layout(rect=(0, 0, 1, .91))
+            save(fig, f'task_{stage + 1}_{suffix}')
     return files
 
 

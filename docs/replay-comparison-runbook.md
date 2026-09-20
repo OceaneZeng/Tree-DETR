@@ -88,6 +88,11 @@ replay_comparison_v1/
     └── task_2_curves.png / .svg  # 每个请求的 Task 一张
 ```
 
+另外生成 `task_2_teacher_detail.png/.svg` 和 `task_2_teacher_difference.png/.svg`：
+前者仅展示 GLCA 与 Uniform + teacher，使用明确标注的非零起点局部纵轴；
+后者展示两组在同一 seed/epoch 的真实差值（百分点），纵轴以零为中心对称。
+所有五项指标及负差值均保留，不修改原始结果。不同线型和点形用于区分重叠曲线。
+
 所有训练完成后自动生成报告，也可随时单独执行：
 
 ```bash

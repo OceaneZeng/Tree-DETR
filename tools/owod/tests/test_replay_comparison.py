@@ -248,7 +248,7 @@ class ReplayComparisonTests(unittest.TestCase):
                 self.finish(directory, plan)
             with contextlib.redirect_stdout(io.StringIO()):
                 result = plot.build_report(args.output_dir)
-            self.assertEqual(len(result['figures']), 8)
+            self.assertEqual(len(result['figures']), 16)
             for name in result['figures']:
                 self.assertGreater((result['report_dir'] / name).stat().st_size, 1000)
             last_unknown = [r for r in result['finals'] if r['task'] == 4 and r['metric'] == 'u_recall']
