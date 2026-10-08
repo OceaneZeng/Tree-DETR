@@ -235,7 +235,7 @@ class PaperPostProcess(nn.Module):
     def forward(self, outputs, target_sizes):
         logits = outputs['pred_logits']
         # Sparse COCO slots stay intact; 91 is a dedicated unknown category.
-        categories = torch.tensor(self.known_ids + [91], device=logits.device)
+        categories = torch.tensor(self.known_ids + ([] if len(self.known_ids) == 80 else [91]), device=logits.device)
         probabilities = logits[..., categories].sigmoid()
         scores, indices = probabilities.flatten(1).topk(
             min(self.max_detections, probabilities[0].numel()), dim=1)
@@ -310,11 +310,12 @@ def build(args):
     if args.paper_baseline in ('prob', 'owobj'):
         postprocessor = EnergyPostProcess(
             args.owod_known_class_ids, args.unknown_threshold,
+            max_detections=getattr(args, 'owod_max_detections', 100),
             # The paper scales temperature by the decoder feature dimension.
             temperature=args.prob_objectness_temperature / args.hidden_dim,
             multiply_objectness=args.paper_baseline == 'prob')
     else:
         postprocessor = PaperPostProcess(
             args.owod_known_class_ids, args.unknown_threshold,
-            max_detections=50 if args.paper_baseline == 'cat' else 100)
+            max_detections=50 if args.paper_baseline == 'cat' else getattr(args, 'owod_max_detections', 100))
     return model, PaperCriterion(criterion, args, model), {'bbox': postprocessor}

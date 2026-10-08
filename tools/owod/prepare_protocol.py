@@ -22,14 +22,14 @@ def main() -> None:
     parser.add_argument("--protocol", required=True, choices=sorted(PROTOCOLS))
     parser.add_argument("--source-reference", required=True,
                         help="official release URL, repository commit, or archive identifier")
+    parser.add_argument('--image-root', required=True, type=Path,
+                        help='root against which stage image file_name paths are resolved')
     parser.add_argument("--output", required=True, type=Path,
                         help="destination split_manifest.json")
-    parser.add_argument("--allow-image-overlap", action="store_true",
-                        help="diagnostic only; resulting manifest is not paper-comparable")
     args = parser.parse_args()
     manifest = build_official_manifest(
-        args.annotation_root, args.protocol, args.source_reference,
-        allow_image_overlap=args.allow_image_overlap)
+        args.annotation_root, args.protocol, args.source_reference)
+    manifest['image_root'] = str(args.image_root.resolve())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from tools.owod import run_mowodb_reimplementations as runner
+from tools.owod import cuda_preflight as runner
 
 
 class CudaPreflightTests(unittest.TestCase):

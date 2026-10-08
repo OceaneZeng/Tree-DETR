@@ -25,7 +25,7 @@ from models.graph_local.distillation import old_class_distillation_losses
 from models.graph_local.losses import local_margin_loss, projection_loss
 from models.graph_local.lora import lora_delta_vector
 from models.graph_local.pseudo_labels import select_teacher_pseudo_labels
-from models.owod_metrics import compute_owod_metrics, harmonic_score, table1_summary
+from models.owod_benchmark_eval import evaluate_author_benchmark
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -167,7 +167,9 @@ def _coco_ap50_for_categories(coco_eval, category_ids) -> float:
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir,
              owod_known_class_ids=None, owod_unknown_threshold=0.5,
              owod_previous_class_ids=None, owod_current_class_ids=None,
-             print_freq=100):
+             print_freq=100, owod_specification=None):
+    if owod_known_class_ids is not None and owod_specification is None:
+        raise ValueError('OWOD evaluation requires the locked author benchmark specification')
     model.eval()
     criterion.eval()
 
@@ -197,7 +199,17 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         outputs = model(samples)
-        loss_dict = criterion(outputs, targets)
+        loss_targets = targets
+        if owod_known_class_ids is not None:
+            loss_targets = []
+            for target in targets:
+                visible = torch.zeros_like(target['labels'], dtype=torch.bool)
+                for category in owod_known_class_ids:
+                    visible |= target['labels'] == category
+                loss_targets.append({key: value[visible] if key in
+                                     {'labels', 'boxes', 'area', 'iscrowd', 'masks', 'keypoints'}
+                                     else value for key, value in target.items()})
+        loss_dict = criterion(outputs, loss_targets)
         weight_dict = criterion.weight_dict
 
         # reduce losses over all GPUs for logging purposes
@@ -265,7 +277,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             }
             class_ap50 = {key: value for key, value in class_ap50.items()
                           if not math.isnan(value)}
-            if class_ap50:
+            if class_ap50 and owod_known_class_ids is None:
                 stats.update({f'owod_{key.lower()}_ap50': value
                               for key, value in class_ap50.items()})
                 print("OWOD class AP50:", class_ap50)
@@ -283,16 +295,13 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             torch.distributed.all_gather_object(gathered_targets, owod_targets)
             owod_predictions = [item for batch in gathered_predictions for item in batch]
             owod_targets = [item for batch in gathered_targets for item in batch]
-        owod_stats = compute_owod_metrics(
-            owod_predictions, owod_targets, owod_known_class_ids,
-            threshold=owod_unknown_threshold)
-        stats.update({f'owod_{key.lower().replace("-", "_")}': value
-                      for key, value in owod_stats.items()})
-        print("OWOD metrics:", owod_stats)
-        if class_ap50:
-            if owod_stats["unknown_gt"] > 0:
-                stats["owod_h_score"] = harmonic_score(
-                    class_ap50.get("Known", class_ap50.get("Current", 0.0)),
-                    owod_stats["U-Recall"])
-            print("OWOD Table 1 (%):", table1_summary(class_ap50, owod_stats))
+        by_image = {}
+        for prediction, target in zip(owod_predictions, owod_targets):
+            # Remove distributed sampler padding before author-list weighting.
+            by_image.setdefault(int(target['image_id'].item()), prediction)
+        benchmark_stats = evaluate_author_benchmark(
+            by_image, base_ds, owod_known_class_ids, owod_previous_class_ids or [],
+            owod_current_class_ids or [], owod_specification)
+        stats.update({'owod_' + key: value for key, value in benchmark_stats.items()})
+        print('Author OWOD protocol metrics:', benchmark_stats)
     return stats, coco_evaluator

@@ -32,6 +32,7 @@ from util.experiment_log import (archive_log_file, experiment_log_path,
                                  prepare_log_file, start_file_logging,
                                  stop_file_logging)
 from models.owod_detector import detector_profile_dict
+from tools.owod.strict_setting import configure_run, validate_checkpoint
 
 
 def load_local_checkpoint(path):
@@ -95,6 +96,10 @@ def get_args_parser():
                         help='S-OWODB/M-OWODB split manifest used for this run')
     parser.add_argument('--owod-stage', default=None, type=int,
                         help='Stage index in --owod-manifest, recorded in run metadata')
+    parser.add_argument('--owod-phase', choices=('increment', 'finetune'), default='increment')
+    parser.add_argument('--owod-recipe', choices=('ore-paper', 'ow-detr-paper'), default=None)
+    parser.add_argument('--backbone-weights', default='',
+                        help='Backbone-only pretraining weights; S-OWODB uses original DINO ResNet-50')
     parser.add_argument('--unknown-threshold', default=0.5, type=float,
                         help='Threshold used to mark post-processed predictions as unknown')
     parser.add_argument('--owod-known-class-ids', type=int, nargs='+', default=None,
@@ -245,6 +250,7 @@ def get_args_parser():
 
 
 def main(args):
+    configure_run(args)
     if args.paper_baseline == 'ew-detr' and (args.ew_current_samples <= 0 or args.ew_previous_samples < 0):
         raise ValueError('EW-DETR requires positive current and nonnegative previous sample counts')
     if args.paper_baseline == 'cat' and not Path(args.cat_proposals).is_file():
@@ -326,12 +332,14 @@ def main(args):
     # LoRA factors or weights restored from an interrupted current-stage run.
     if args.pretrained:
         checkpoint = load_local_checkpoint(args.pretrained)
+        validate_checkpoint(args, checkpoint)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         if args.paper_baseline:
             source_args = checkpoint.get('args')
             if getattr(source_args, 'paper_baseline', None) != args.paper_baseline:
                 raise ValueError('Baseline stage transitions must use their own checkpoint chain')
-            if getattr(source_args, 'owod_stage', -2) != args.owod_stage - 1:
+            expected_stage = args.owod_stage if args.owod_phase == 'finetune' else args.owod_stage - 1
+            if getattr(source_args, 'owod_stage', -2) != expected_stage:
                 raise ValueError('Baseline checkpoint is not from the immediately previous stage')
             if args.paper_baseline == 'ew-detr' and not checkpoint.get('ew_consolidated'):
                 raise ValueError('EW stage transitions require a consolidated checkpoint')
@@ -521,6 +529,7 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = load_local_checkpoint(args.resume)
+        validate_checkpoint(args, checkpoint, resume=True)
         if args.paper_baseline:
             saved_args = checkpoint.get('args')
             if (getattr(saved_args, 'paper_baseline', None) != args.paper_baseline
@@ -570,6 +579,7 @@ def main(args):
                 owod_unknown_threshold=args.unknown_threshold,
                 owod_previous_class_ids=args.owod_previous_class_ids,
                 owod_current_class_ids=args.owod_current_class_ids,
+                owod_specification=getattr(args, "owod_evaluation", None),
                 print_freq=args.eval_print_freq,
             )
     
@@ -580,6 +590,7 @@ def main(args):
                                               owod_unknown_threshold=args.unknown_threshold,
                                               owod_previous_class_ids=args.owod_previous_class_ids,
                                               owod_current_class_ids=args.owod_current_class_ids,
+                                              owod_specification=getattr(args, "owod_evaluation", None),
                                               print_freq=args.eval_print_freq)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
@@ -645,6 +656,7 @@ def main(args):
                 owod_unknown_threshold=args.unknown_threshold,
                 owod_previous_class_ids=args.owod_previous_class_ids,
                 owod_current_class_ids=args.owod_current_class_ids,
+                owod_specification=getattr(args, "owod_evaluation", None),
                 print_freq=args.eval_print_freq,
             )
         else:
@@ -679,6 +691,7 @@ def main(args):
             owod_unknown_threshold=args.unknown_threshold,
             owod_previous_class_ids=args.owod_previous_class_ids,
             owod_current_class_ids=args.owod_current_class_ids,
+            owod_specification=getattr(args, "owod_evaluation", None),
             print_freq=args.eval_print_freq)
         utils.save_on_master({'model': model_without_ddp.state_dict(), 'args': args,
                               'epoch': args.epochs - 1, 'ew_consolidated': True,

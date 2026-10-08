@@ -229,6 +229,8 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
+    if getattr(args, 'owod_image_root', ''):
+        img_folder = Path(args.owod_image_root)
     annotation_override = getattr(args, f'{image_set}_ann', '')
     if annotation_override:
         ann_file = Path(annotation_override)

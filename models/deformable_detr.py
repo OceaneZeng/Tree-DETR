@@ -230,6 +230,7 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
+        self.active_class_ids = None
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
@@ -249,7 +250,11 @@ class SetCriterion(nn.Module):
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:,:,:-1]
-        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+        supervised_logits = src_logits
+        if self.active_class_ids is not None:
+            supervised_logits = src_logits[..., self.active_class_ids]
+            target_classes_onehot = target_classes_onehot[..., self.active_class_ids]
+        loss_ce = sigmoid_focal_loss(supervised_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
 
         if log:
@@ -410,9 +415,11 @@ class SetCriterion(nn.Module):
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    def __init__(self, unknown_threshold=0.5):
+    def __init__(self, unknown_threshold=0.5, known_ids=None, max_detections=100):
         super().__init__()
         self.unknown_threshold = float(unknown_threshold)
+        self.known_ids = known_ids
+        self.max_detections = max_detections
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -429,11 +436,21 @@ class PostProcess(nn.Module):
         assert target_sizes.shape[1] == 2
 
         prob = out_logits.sigmoid()
-        unknown = unknown_score(outputs)
-        topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
+        if self.known_ids is not None:
+            categories = torch.tensor(self.known_ids, device=out_logits.device)
+            prob = prob[..., categories]
+            unknown = 1. - prob.amax(-1)
+            if len(self.known_ids) < 80:
+                categories = torch.cat([categories, categories.new_tensor([91])])
+                prob = torch.cat([prob, unknown[..., None]], -1)
+        else:
+            categories = torch.arange(out_logits.shape[-1], device=out_logits.device)
+            unknown = unknown_score(outputs)
+        topk_values, topk_indexes = torch.topk(prob.flatten(1),
+                                             min(self.max_detections, prob[0].numel()), dim=1)
         scores = topk_values
-        topk_boxes = topk_indexes // out_logits.shape[2]
-        labels = topk_indexes % out_logits.shape[2]
+        topk_boxes = topk_indexes // len(categories)
+        labels = categories[topk_indexes % len(categories)]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
 
@@ -514,9 +531,12 @@ def build(args):
     # num_classes, matcher, weight_dict, losses, focal_alpha=0.25
     criterion = SetCriterion(num_classes, matcher, weight_dict, losses,
                              focal_alpha=args.focal_alpha)
+    criterion.active_class_ids = getattr(args, 'owod_known_class_ids', None)
     criterion.to(device)
     postprocessors = {'bbox': PostProcess(
-        unknown_threshold=getattr(args, 'unknown_threshold', 0.5))}
+        unknown_threshold=getattr(args, 'unknown_threshold', 0.5),
+        known_ids=getattr(args, 'owod_known_class_ids', None),
+        max_detections=getattr(args, 'owod_max_detections', 100))}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
         if args.dataset_file == "coco_panoptic":

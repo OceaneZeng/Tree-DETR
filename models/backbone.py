@@ -103,13 +103,25 @@ class Backbone(BackboneBase):
                  train_backbone: bool,
                  return_interm_layers: bool,
                  dilation: bool,
-                 no_pretrained: bool = False):
+                 no_pretrained: bool = False,
+                 backbone_weights: str = ''):
         # Frozen ImageNet BN is appropriate for the pretrained detector path.
         # A randomly initialized backbone needs trainable running statistics.
-        norm_layer = nn.BatchNorm2d if no_pretrained else FrozenBatchNorm2d
+        norm_layer = nn.BatchNorm2d if no_pretrained and not backbone_weights else FrozenBatchNorm2d
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=(is_main_process() and not no_pretrained), norm_layer=norm_layer)
+            pretrained=(is_main_process() and not no_pretrained and not backbone_weights), norm_layer=norm_layer)
+        if backbone_weights:
+            checkpoint = torch.load(backbone_weights, map_location='cpu', weights_only=True)
+            state = checkpoint.get('teacher', checkpoint.get('state_dict', checkpoint))
+            normalized = {}
+            for key, value in state.items():
+                key = key.removeprefix('module.').removeprefix('backbone.')
+                if not key.startswith(('head.', 'fc.')):
+                    normalized[key] = value
+            missing, unexpected = backbone.load_state_dict(normalized, strict=False)
+            if any(not key.startswith('fc.') for key in missing):
+                raise ValueError(f'Incomplete backbone-only pretraining: {missing}')
         channels_by_backbone = {
             'resnet18': [128, 256, 512],
             'resnet34': [128, 256, 512],
@@ -149,6 +161,7 @@ def build_backbone(args):
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks or (args.num_feature_levels > 1)
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation,
-                        getattr(args, 'no_pretrained_backbone', False))
+                        getattr(args, 'no_pretrained_backbone', False),
+                        getattr(args, 'backbone_weights', ''))
     model = Joiner(backbone, position_embedding)
     return model
