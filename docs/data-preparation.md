@@ -11,8 +11,11 @@
 | M-OWODB | ORE 作者发布的 VOC2007/2012 + COCO 合并版 | `Annotations/*.xml`、`JPEGImages/*.jpg` |
 | S-OWODB | 完整 COCO2017 | `train2017/`、`val2017/`、`annotations/instances_train2017.json`、`annotations/instances_val2017.json` |
 
-M 使用 [ORE 作者数据入口](https://drive.google.com/drive/folders/1S5L-YmIiFMAKTs6nHMorB0Osz5iWI31k)。
-需要作者合并后的完整标注和图像；COCO2017 单独不足以构造 M 的 VOC Task 1。
+M 可使用 [ORE 作者数据入口](https://drive.google.com/drive/folders/1S5L-YmIiFMAKTs6nHMorB0Osz5iWI31k)
+的完整发布版，或依据已核验的作者转换代码从 VOC/COCO2017 重建。
+2026-10-10 已确认官方仓库包含 COCO JSON→XML 转换器，具体规则和覆盖核查见
+[ORE 源码审计](ore-source-audit.md)。现有下载入口尚不自动执行该重建。
+COCO2017 单独不足以构造 M 的 VOC Task 1。
 
 S 从 COCO 官方获取
 [train2017](https://images.cocodataset.org/zips/train2017.zip)、
@@ -29,8 +32,9 @@ python tools/owod/download_data.py --benchmark both
 
 脚本下载官方 COCO ZIP 与 DINO ResNet-50，支持断点续传、目标锁、来源/哈希
 记录与安全解压。COCO 使用同一官方 S3 bucket 的有效 TLS 地址，不关闭证书
-校验。M 仍要求 ORE 合并发布版；2026-10-08 作者 Drive 文件夹为空，失败会
-明确记录。下载失败不能用自行合并的猜测标注代替作者原始输入。
+校验。M 下载分支仍尝试获取 ORE 合并发布版；2026-10-08 访问作者 Drive 时未
+找到可下载文件，失败会明确记录。作者源码重建是另一条可行路径，但下载失败
+不能用猜测的转换规则或重新抽样的清单替代。
 
 默认布局如下；原始数据也可以保存在另一块磁盘上，修改配置中的路径即可。
 
