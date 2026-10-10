@@ -1,5 +1,10 @@
 # ORE 官方代码与 M-OWODB 数据审计（2026-10-10）
 
+后续实现：`tools/owod/prepare_ore.py` 已补齐按以下规则重建 COCO 组件的入口。
+样例输出与固定版本官方转换器逐字节一致；边界框、crowd、冲突保护和来源变化
+测试通过。完整使用命令见 [数据准备](data-preparation.md)，完整 M 数据准备
+是否成功仍以实际 prepare/verify 结果为准。
+
 核对源：<https://github.com/JosephKJ/OWOD>，固定 commit
 `23890f188cd1a6801c6ac0e3dacd78b8572b8c29`。只读副本保存在忽略目录
 `tmp/ore-official`，不纳入本项目 Git。

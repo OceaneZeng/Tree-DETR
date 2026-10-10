@@ -14,7 +14,8 @@
 M 可使用 [ORE 作者数据入口](https://drive.google.com/drive/folders/1S5L-YmIiFMAKTs6nHMorB0Osz5iWI31k)
 的完整发布版，或依据已核验的作者转换代码从 VOC/COCO2017 重建。
 2026-10-10 已确认官方仓库包含 COCO JSON→XML 转换器，具体规则和覆盖核查见
-[ORE 源码审计](ore-source-audit.md)。现有下载入口尚不自动执行该重建。
+[ORE 源码审计](ore-source-audit.md)。重建入口为 `tools/owod/prepare_ore.py`，
+下载入口不会自动执行该重建。
 COCO2017 单独不足以构造 M 的 VOC Task 1。
 
 S 从 COCO 官方获取
@@ -83,6 +84,26 @@ data/raw/voc/
 整理 VOC 不会虚构缺失的作者 COCO XML，也不会把不完整 M 数据标记为可训练。
 
 ## 2. 查看和生成划分
+
+服务器已上传六个 VOC/COCO 压缩包时，在项目根目录依次执行：
+
+```bash
+mkdir -p data/raw/coco
+unzip -n -q data/raw/archives/train2017.zip -d data/raw/coco
+unzip -n -q data/raw/archives/val2017.zip -d data/raw/coco
+unzip -n -q data/raw/archives/annotations_trainval2017.zip -d data/raw/coco
+python tools/owod/prepare_voc.py --downloads data/raw/archives
+python tools/owod/prepare_ore.py --coco-root data/raw/coco --ore-root data/raw/ore
+python tools/owod/manage_data.py prepare --benchmark both --ore-root data/raw/ore --coco-root data/raw/coco --output-root data/owod
+python tools/owod/manage_data.py verify --benchmark both --ore-root data/raw/ore --coco-root data/raw/coco --output-root data/owod --decode-images
+```
+
+每条命令成功后再执行下一条。已成功解压的包无需重复解压。
+`prepare_ore.py` 仅发布固定 M 清单所需的 COCO 图像/XML，保留全部原始
+类别和 crowd 目标，严格采用作者坐标转换规则。图像同盘优先硬链接；不同
+内容的已有 XML/图片拒绝覆盖。`coco_source_manifest.json` 记录作者 commit、
+转换实现/输入 JSON/输出 XML/图片哈希；它不替代正式 schema-3 split manifest。
+若已有目录来自其他机器或输入版本，使用全新的输出目录，不手工修改旧 manifest。
 
 在项目根目录运行：
 
