@@ -20,6 +20,21 @@ def arguments(manifest, stage=0, phase='increment'):
 
 
 class StrictSettingTests(unittest.TestCase):
+    def test_discovery_version_and_message_mode_cannot_change_in_chain(self):
+        import copy
+        args = SimpleNamespace(owod_manifest='verified.json', owod_manifest_sha256='same',
+                               owod_recipe='ow-detr-paper', owod_discovery=True,
+                               discovery_version=2, discovery_no_message=False)
+        for field, wrong in [('discovery_version', 1), ('discovery_no_message', True)]:
+            saved = copy.deepcopy(args)
+            setattr(saved, field, wrong)
+            with self.assertRaisesRegex(ValueError, field):
+                validate_checkpoint(args, {'args': saved})
+        saved = copy.deepcopy(args)
+        saved.discovery_scoring = 'focal'
+        with self.assertRaisesRegex(ValueError, 'discovery_scoring'):
+            validate_checkpoint(args, {'args': saved})
+
     @patch('tools.owod.protocol.official_split', fixture_split)
     def test_phase_files_derive_labels_and_reject_old_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -73,6 +88,48 @@ class StrictSettingTests(unittest.TestCase):
                 configure_run(args)
 
     @patch('tools.owod.protocol.official_split', fixture_split)
+    def test_graph_checkpoint_method_and_layout_are_bound_to_protocol(self):
+        import copy
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_tree(root)
+            manifest = build_official_manifest(root, 'm-owodb', 'author-release-fixture')
+            manifest['image_root'] = str(root)
+            path = root / 'split_manifest.json'
+            path.write_text(json.dumps(manifest), encoding='utf-8')
+            args = arguments(path, stage=1, phase='finetune')
+            args.pretrained = 'increment.pth'
+            args.graph_routed_adapter = True
+            args.with_tree = args.neighbor_scoped_lora = args.reset_classifier = args.masks = args.two_stage = False
+            args.frozen_weights = None
+            args.off_projection_coef = 0
+            args.dec_layers = 6
+            args.graph_adapter_rank = 8
+            args.graph_adapter_last_n = 2
+            args.graph_risk_beta = 2.
+            args.graph_route_loss_coef = 1.
+            args.graph_sketch_max_images = 12
+            configure_run(args)
+            saved = copy.deepcopy(args)
+            saved.owod_phase = 'increment'
+            saved.epochs = 50
+            saved.graph_adapter_specs = [dict(stage=1, class_ids=args.owod_current_class_ids,
+                                              old_ids=args.owod_previous_class_ids,
+                                              rank=8, last_n=2, risk_beta=2.)]
+            payload = {'args': saved, 'epoch': 49}
+            validate_checkpoint(args, payload)
+            args.graph_localization = 'bbox-last'
+            with self.assertRaisesRegex(ValueError, 'graph_localization'):
+                validate_checkpoint(args, payload)
+            args.graph_localization = 'frozen'
+            saved.graph_adapter_specs[0]['class_ids'] = [999]
+            with self.assertRaisesRegex(ValueError, 'layout'):
+                validate_checkpoint(args, payload)
+            saved.graph_routed_adapter = False
+            with self.assertRaisesRegex(ValueError, 'switch'):
+                validate_checkpoint(args, payload)
+
+    @patch('tools.owod.protocol.official_split', fixture_split)
     def test_run_plan_has_separate_phases_and_previous_finetuning_chain(self):
         from tools.owod.run_benchmark import build_plan
         from unittest.mock import Mock
@@ -96,6 +153,41 @@ class StrictSettingTests(unittest.TestCase):
             self.assertEqual([r['epochs'] for r in plan['runs']], [50, 50, 20, 50, 20, 50, 20])
             command = plan['runs'][3]['command']
             self.assertIn('stage_1/finetune/checkpoint.pth', command[command.index('--pretrained') + 1].replace('\\', '/'))
+            args.method = 'graph-adapter'
+            args.graph_adapter_rank = 8
+            args.graph_adapter_last_n = 2
+            args.graph_risk_beta = 2.
+            args.graph_route_loss_coef = 1.
+            args.graph_sketch_max_images = 12
+            graph_plan = build_plan(args)
+            calibrations = [r for r in graph_plan['runs'] if r.get('kind') == 'calibration']
+            training = [r for r in graph_plan['runs'] if r.get('kind') != 'calibration']
+            self.assertEqual(len(calibrations), 3)
+            self.assertEqual([r['phase'] for r in training], [r['phase'] for r in plan['runs']])
+            self.assertEqual([r['epochs'] for r in training], [r['epochs'] for r in plan['runs']])
+            for calibration, index in zip(calibrations, (0, 2, 4)):
+                command = calibration['command']
+                self.assertEqual(command[command.index('--checkpoint') + 1],
+                                 str(Path(training[index]['output_dir']) / 'checkpoint.pth'))
+            for run in training:
+                self.assertIn('--graph-routed-adapter', run['command'])
+                if run['stage'] > 0:
+                    self.assertIn('--old-class-distillation', run['command'])
+            args.method = 'discovery-scratch'
+            scratch_plan = build_plan(args)
+            for run in scratch_plan['runs']:
+                if run.get('kind') != 'calibration':
+                    self.assertIn('--owod-discovery', run['command'])
+                    self.assertIn('--discovery-no-transfer', run['command'])
+                    if run['stage'] > 0:
+                        self.assertIn('--old-class-distillation', run['command'])
+            args.method = 'discovery-no-message'
+            message_plan = build_plan(args)
+            for run in message_plan['runs']:
+                if run.get('kind') != 'calibration':
+                    self.assertIn('--owod-discovery', run['command'])
+                    self.assertIn('--discovery-no-message', run['command'])
+                    self.assertNotIn('--discovery-no-transfer', run['command'])
 
 
 if __name__ == '__main__':

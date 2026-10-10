@@ -38,8 +38,21 @@ def build_plan(args):
     if args.backbone_weights and not args.backbone_weights.is_file():
         raise FileNotFoundError(args.backbone_weights)
     image_root = Path(manifest['image_root'])
+    method = getattr(args, 'method', 'control')
     runs, previous = [], None
     for stage in range(4):
+        gnn_checkpoint = None
+        if method != 'control' and stage > 0:
+            calibration_dir = args.output_dir / manifest['protocol'] / f'seed_{args.seed}' / 'gnn' / f'stage_{stage - 1}'
+            gnn_checkpoint = calibration_dir / f'gnn_stage{stage - 1}.pt'
+            runs.append({'kind': 'calibration', 'stage': stage - 1, 'phase': 'calibration',
+                         'output_dir': str(calibration_dir), 'command': [
+                             sys.executable, str(ROOT / 'tools/owod/calibrate_interference_gnn.py'),
+                             '--manifest', str(args.manifest), '--stage', str(stage - 1),
+                             '--checkpoint', str(previous), '--output-dir', str(calibration_dir),
+                             '--seed', str(args.seed), '--num_workers', str(args.num_workers),
+                             '--last-decoder-layers', str(args.graph_adapter_last_n),
+                             '--probe-rank', str(args.graph_adapter_rank)]})
         _, files = stage_files(args.manifest, stage)
         for key in ('increment_train', 'train', 'full_val'):
             payload = read_json(files[key])
@@ -65,6 +78,8 @@ def build_plan(args):
                         '--batch_size', str(args.batch_size), '--num_workers', str(args.num_workers),
                         '--seed', str(args.seed), '--lr_drop', str(max(1, n_epochs)),
                         '--eval_interval', '1']
+            if getattr(args, 'activation_checkpointing', False):
+                command += ['--activation-checkpointing']
             if args.recipe == 'ore-paper':
                 if args.batch_size * args.nproc_per_node != 8:
                     raise ValueError('ORE Appendix F requires effective batch size 8')
@@ -75,6 +90,28 @@ def build_plan(args):
                 command += ['--backbone-weights', str(args.backbone_weights)]
             if previous:
                 command += ['--pretrained', str(previous)]
+            if method != 'control':
+                command += ['--graph-routed-adapter', '--graph-adapter-rank', str(args.graph_adapter_rank),
+                            '--graph-adapter-last-n', str(args.graph_adapter_last_n),
+                            '--graph-risk-beta', str(args.graph_risk_beta),
+                            '--graph-route-loss-coef', str(args.graph_route_loss_coef),
+                            '--graph-routing', getattr(args, 'graph_routing', 'hard'),
+                            '--graph-localization', getattr(args, 'graph_localization', 'frozen'),
+                            '--graph-sketch-max-images', str(args.graph_sketch_max_images)]
+                if gnn_checkpoint:
+                    command += ['--graph-gnn-checkpoint', str(gnn_checkpoint)]
+                if stage > 0:
+                    # Hold preservation constant across discovery and its adapter baseline.
+                    record = manifest['stages'][stage]
+                    old = [c for c in manifest['category_order_source_ids']
+                           if c in set(record['active_classes']) - set(record['classes'])]
+                    command += ['--old-class-distillation', '--distill-old-class-ids', *map(str, old)]
+            if method.startswith('discovery'):
+                command += ['--owod-discovery', '--discovery-scoring', getattr(args, 'discovery_scoring', 'hierarchical')]
+                if method == 'discovery-scratch':
+                    command += ['--discovery-no-transfer']
+                if method == 'discovery-no-message':
+                    command += ['--discovery-no-message']
             runs.append({'stage': stage, 'phase': phase, 'command': command,
                          'output_dir': str(directory), 'epochs': n_epochs})
             previous = directory / 'checkpoint.pth'
@@ -82,7 +119,9 @@ def build_plan(args):
             'backbone_weights_sha256': file_sha256(args.backbone_weights) if args.backbone_weights else None,
             'recipe': args.recipe, 'recipe_source': ('ORE Appendix F; separate finetuning schedule supplied explicitly'
                                                     if args.recipe == 'ore-paper' else 'OW-DETR Appendix D'),
-            'model': 'Local Deformable DETR control (not an ORE/OW-DETR method reproduction)',
+            'model': ('Open-world discovery and prototype promotion (project method)' if method.startswith('discovery')
+                      else 'Graph risk-routed class adapters (project method)' if method == 'graph-adapter'
+                      else 'Local Deformable DETR control (not an ORE/OW-DETR method reproduction)'),
             'runs': runs}
 
 
@@ -94,12 +133,23 @@ def main(argv=None):
     parser.add_argument('--finetune-epochs', type=int)
     parser.add_argument('--backbone-weights', type=Path)
     parser.add_argument('--batch-size', type=int, default=2)
+    parser.add_argument('--activation-checkpointing', action='store_true')
     parser.add_argument('--nproc-per-node', type=int, default=4)
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--gpus', default='')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--method', choices=('control', 'graph-adapter', 'discovery', 'discovery-scratch',
+                                            'discovery-no-message'), default='control')
+    parser.add_argument('--graph-adapter-rank', type=int, default=8)
+    parser.add_argument('--graph-adapter-last-n', type=int, default=2)
+    parser.add_argument('--graph-risk-beta', type=float, default=2.0)
+    parser.add_argument('--graph-route-loss-coef', type=float, default=1.0)
+    parser.add_argument('--graph-routing', choices=('hard', 'soft'), default='hard')
+    parser.add_argument('--graph-localization', choices=('frozen', 'bbox-last'), default='frozen')
+    parser.add_argument('--discovery-scoring', choices=('hierarchical', 'focal'), default='hierarchical')
+    parser.add_argument('--graph-sketch-max-images', type=int, default=12)
     args = parser.parse_args(argv)
     if args.nproc_per_node < 1 or args.batch_size < 1 or (args.finetune_epochs is not None and args.finetune_epochs < 1):
         raise ValueError('Process count, batch size and finetuning epochs must be positive')
@@ -127,6 +177,13 @@ def main(argv=None):
         env['CUDA_VISIBLE_DEVICES'] = args.gpus
     for run in plan['runs']:
         directory = Path(run['output_dir'])
+        if run.get('kind') == 'calibration':
+            # Content-addressed calibration caches are verified by its runner.
+            # Re-run on resume so changed/partial artifacts cannot be trusted.
+            result = subprocess.run(run['command'], cwd=ROOT, env=env)
+            if result.returncode:
+                return result.returncode
+            continue
         marker = directory / 'training_complete.json'
         command = list(run['command'])
         if args.resume and marker.is_file():

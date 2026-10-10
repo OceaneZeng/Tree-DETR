@@ -24,7 +24,8 @@ from tools.owod.gnn_calibration import (build_calibration_dataset, class_loss,
                                         compute_gradient_sketches, atomic_torch_save,
                                         empirical_harm_row, load_detector,
                                         run_source_probe, set_seed)
-from tools.owod.protocol import stage_files
+from tools.owod.protocol import stage_files, file_sha256
+from main import load_local_checkpoint
 from util.experiment_log import start_file_logging, stop_file_logging
 import util.misc as utils
 
@@ -200,6 +201,18 @@ def run(args: argparse.Namespace) -> int:
     checked_manifest, files = stage_files(
         args.manifest, args.stage, allow_unverified=args.allow_unverified_protocol)
     annotation = files["train"]
+    checkpoint_payload = load_local_checkpoint(args.checkpoint)
+    checkpoint_args = checkpoint_payload.get('args')
+    expected_phase = 'increment' if args.stage == 0 else 'finetune'
+    if (checkpoint_args is None
+            or getattr(checkpoint_args, 'owod_manifest_sha256', None) != file_sha256(args.manifest)
+            or getattr(checkpoint_args, 'owod_stage', None) != args.stage
+            or getattr(checkpoint_args, 'owod_phase', None) != expected_phase
+            or checkpoint_payload.get('epoch') != checkpoint_args.epochs - 1):
+        raise ValueError('GNN calibration requires the completed official preceding task checkpoint')
+    identity = {'checkpoint_sha256': file_sha256(args.checkpoint),
+                'manifest_sha256': file_sha256(args.manifest),
+                'annotation_sha256': file_sha256(annotation)}
     if args.force:
         print("--force ignores existing sketch and harm-row cache files")
 
@@ -218,15 +231,16 @@ def run(args: argparse.Namespace) -> int:
         "protocol_validation": checked_manifest.get("validation_mode", "official"),
         "paper_comparable": bool(checked_manifest.get("paper_comparable", False)),
     }, indent=2))
-    dataset = build_calibration_dataset(Path(args.coco_path).resolve(), annotation,
+    dataset = build_calibration_dataset(Path(checked_manifest['image_root']), annotation,
                                         lightweight=args.lightweight)
     model, criterion = load_detector(args, args.checkpoint, device)
+    criterion.active_class_ids = class_ids
 
     sketch_cache = args.output_dir / "sketches"
     sketches, sketch_counts = compute_gradient_sketches(
         model, criterion, {class_id: dataset for class_id in class_ids}, class_ids,
         device, cache_dir=sketch_cache, reuse_cache=not args.force,
-        cache_identity={"checkpoint": str(args.checkpoint),
+        cache_identity={**identity, "checkpoint": str(args.checkpoint),
                         "annotation": str(annotation)},
         batch_size=args.batch_size,
         num_workers=args.num_workers, max_images=args.sketch_max_images,
@@ -237,6 +251,7 @@ def run(args: argparse.Namespace) -> int:
     base_losses: dict[int, float] = {}
     base_counts: dict[int, int] = {}
     base_loss_config = {
+        **identity,
         "checkpoint": str(args.checkpoint),
         "annotation": str(annotation),
         "batch_size": args.batch_size,
@@ -307,6 +322,7 @@ def run(args: argparse.Namespace) -> int:
             "probe_losses": probe_losses,
             "probe_steps": args.probe_steps,
             "probe_lr": args.probe_lr,
+            "last_decoder_layers": args.last_decoder_layers,
             "probed_source_classes": probe_sources,
             "production_ready": len(probe_sources) == len(class_ids),
             "probe_delta_norm": probe_delta_norm,
@@ -334,8 +350,10 @@ def run(args: argparse.Namespace) -> int:
         "harm": harm,
         "valid_mask": valid,
         "metadata": {
+            **identity,
             "supervision": "empirical_train_loss_increase",
             "feature_source": "detector_decoder_ffn_gradient_sketch",
+            "last_decoder_layers": args.last_decoder_layers,
             "checkpoint": str(args.checkpoint),
             "annotation": str(annotation),
             "stage": args.stage,

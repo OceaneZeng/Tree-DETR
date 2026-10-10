@@ -186,6 +186,10 @@ class DeformableDETR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
 
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        from .graph_local.routed_adapter import routing_outputs
+        routes = routing_outputs(self)
+        if routes:
+            out['adapter_routes'] = routes
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
@@ -254,7 +258,12 @@ class SetCriterion(nn.Module):
         if self.active_class_ids is not None:
             supervised_logits = src_logits[..., self.active_class_ids]
             target_classes_onehot = target_classes_onehot[..., self.active_class_ids]
-        loss_ce = sigmoid_focal_loss(supervised_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+        query_weights = outputs.get('query_label_weights')
+        if query_weights is not None:
+            query_weights = query_weights.clone()
+            query_weights[idx] = 1  # Auxiliary matching may differ; GT is never ignored.
+        loss_ce = sigmoid_focal_loss(supervised_logits, target_classes_onehot, num_boxes,
+                                    alpha=self.focal_alpha, gamma=2, query_weights=query_weights) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
 
         if log:
@@ -361,6 +370,10 @@ class SetCriterion(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
+        route_loss = None
+        if outputs.get('adapter_routes'):
+            from .graph_local.routed_adapter import routing_loss
+            route_loss = routing_loss(outputs['adapter_routes'], targets, indices)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
@@ -409,6 +422,11 @@ class SetCriterion(nn.Module):
                 l_dict = {k + f'_enc': v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
+        if route_loss is not None:
+            losses['loss_adapter_route'] = route_loss
+            losses['adapter_active_fraction'] = torch.stack([
+                (logits.detach().argmax(-1) != len(ids)).float().mean()
+                for logits, ids in outputs['adapter_routes']]).mean()
         return losses
 
 

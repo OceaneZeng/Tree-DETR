@@ -12,7 +12,7 @@ dist/
 exps/
 checkpoints/
 /data/
-pretrained/*.pth
+/pretrained/
 configs/data/owod.local.json
 
 # Generated papers, plots, temporary work and document exports

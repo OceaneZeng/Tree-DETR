@@ -1,11 +1,17 @@
 """Shared preflight: official task phases, labels, data hashes, and checkpoint lineage."""
 from pathlib import Path
+import math
 
 from tools.owod.protocol import file_sha256, stage_files, RETIRED_MESSAGE
 
 
 def configure_run(args):
-    requested = bool(args.owod_manifest or args.owod_known_class_ids is not None or args.paper_baseline)
+    if getattr(args, 'owod_discovery', False):
+        from models.graph_local.discovery import DISCOVERY_VERSION
+        args.discovery_version = DISCOVERY_VERSION
+        args.graph_routed_adapter = True
+    requested = bool(args.owod_manifest or args.owod_known_class_ids is not None or args.paper_baseline
+                     or getattr(args, 'graph_routed_adapter', False))
     if not requested:
         return
     if not args.owod_manifest or args.owod_stage is None:
@@ -56,6 +62,32 @@ def configure_run(args):
     args.owod_max_detections = 50 if (manifest['protocol'] == 's-owodb'
                                    or getattr(args, 'owod_recipe', None) == 'ow-detr-paper') else 100
     args.paper_comparable_protocol = True
+    if getattr(args, 'owod_discovery', False):
+        if (args.discovery_capacity < 1 or args.discovery_top_k < 1 or args.discovery_warmup < 0
+                or not math.isfinite(args.discovery_min_support) or args.discovery_min_support <= 0
+                or any(not math.isfinite(value) or not 0 < value <= 1 for value in
+                       (args.discovery_transfer_threshold, args.discovery_saliency_threshold,
+                        args.discovery_consistency_threshold))
+                or args.teacher_completion):
+            raise ValueError('Invalid discovery configuration or unsupported external teacher combination')
+        if args.owod_stage > 0 and not args.discovery_no_keep:
+            if not args.pretrained:
+                raise ValueError('Discovery preservation requires its preceding --pretrained checkpoint, also on resume')
+            args.old_class_distillation = True
+            args.distill_old_class_ids = list(previous)
+    if getattr(args, 'graph_routed_adapter', False):
+        if (args.with_tree or args.paper_baseline or args.neighbor_scoped_lora
+                or args.reset_classifier or args.frozen_weights or args.masks
+                or args.two_stage or args.off_projection_coef):
+            raise ValueError('Graph-routed adapters require the plain one-stage detector without legacy LoRA')
+        if (args.graph_adapter_rank < 1 or not 1 <= args.graph_adapter_last_n <= args.dec_layers
+                or args.graph_sketch_max_images < 1
+                or not math.isfinite(args.graph_risk_beta) or args.graph_risk_beta < 0
+                or not math.isfinite(args.graph_route_loss_coef) or args.graph_route_loss_coef <= 0):
+            raise ValueError('Invalid graph adapter method hyperparameters')
+        if args.owod_stage > 0 and not args.resume and args.owod_phase == 'increment':
+            if not Path(args.graph_gnn_checkpoint).is_file():
+                raise ValueError('New task requires a calibrated preceding-stage --graph-gnn-checkpoint')
 
 
 def validate_checkpoint(args, checkpoint, resume=False):
@@ -66,6 +98,45 @@ def validate_checkpoint(args, checkpoint, resume=False):
         raise ValueError('Checkpoint belongs to an old/custom/different benchmark manifest')
     if getattr(saved, 'owod_recipe', None) != args.owod_recipe:
         raise ValueError('Training recipe changed within the checkpoint chain')
+    if bool(getattr(saved, 'activation_checkpointing', False)) != bool(getattr(args, 'activation_checkpointing', False)):
+        raise ValueError('Activation checkpointing changed within the checkpoint chain')
+    if bool(getattr(saved, 'owod_discovery', False)) != bool(getattr(args, 'owod_discovery', False)):
+        raise ValueError('Cannot switch discovery architecture within the checkpoint chain')
+    if getattr(args, 'owod_discovery', False):
+        if getattr(saved, 'discovery_scoring', 'hierarchical') != getattr(args, 'discovery_scoring', 'hierarchical'):
+            raise ValueError('Discovery checkpoint cannot change discovery_scoring')
+        for field in ('discovery_version', 'discovery_no_message',
+                      'discovery_no_transfer', 'discovery_no_keep', 'discovery_capacity', 'discovery_min_support',
+                      'discovery_transfer_threshold', 'discovery_warmup', 'discovery_top_k',
+                      'discovery_saliency_threshold', 'discovery_consistency_threshold',
+                      'distill_class_coef', 'distill_bbox_coef', 'distill_score_threshold', 'distill_max_queries'):
+            if getattr(saved, field, None) != getattr(args, field, None):
+                raise ValueError(f'Discovery checkpoint cannot change {field}')
+    if bool(getattr(saved, 'graph_routed_adapter', False)) != bool(getattr(args, 'graph_routed_adapter', False)):
+        raise ValueError('Cannot switch graph adapter method within the checkpoint chain')
+    if getattr(args, 'graph_routed_adapter', False):
+        if getattr(saved, 'graph_routing', 'hard') != getattr(args, 'graph_routing', 'hard'):
+            raise ValueError('Graph adapter checkpoint cannot change graph_routing')
+        if getattr(saved, 'graph_localization', 'frozen') != getattr(args, 'graph_localization', 'frozen'):
+            raise ValueError('Graph adapter checkpoint cannot change graph_localization')
+        for field in ('graph_adapter_rank', 'graph_adapter_last_n', 'graph_risk_beta',
+                      'graph_route_loss_coef', 'graph_sketch_max_images'):
+            if getattr(saved, field, None) != getattr(args, field, None):
+                raise ValueError(f'Graph adapter checkpoint cannot change {field}')
+        specs = getattr(saved, 'graph_adapter_specs', [])
+        if len(specs) != saved.owod_stage:
+            raise ValueError('Graph checkpoint has an incomplete persistent adapter bank')
+        manifest, _ = stage_files(Path(args.owod_manifest), saved.owod_stage)
+        for index, spec in enumerate(specs, start=1):
+            record = manifest['stages'][index]
+            old = set(record['active_classes']) - set(record['classes'])
+            if (spec['stage'] != index or set(spec['class_ids']) != set(record['classes'])
+                    or set(spec['old_ids']) != old
+                    or spec['rank'] != args.graph_adapter_rank
+                    or spec['last_n'] != args.graph_adapter_last_n
+                    or spec['risk_beta'] != args.graph_risk_beta
+                    or spec.get('routing', 'hard') != getattr(args, 'graph_routing', 'hard')):
+                raise ValueError('Graph checkpoint adapter layout differs from the official task chain')
     stage = args.owod_stage if resume or args.owod_phase == 'finetune' else args.owod_stage - 1
     phase = args.owod_phase if resume else ('increment' if args.owod_phase == 'finetune'
                                           or stage == 0 else 'finetune')

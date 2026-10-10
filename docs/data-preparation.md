@@ -20,6 +20,18 @@ S 从 COCO 官方获取
 [2017 标注](https://images.cocodataset.org/annotations/annotations_trainval2017.zip)。
 解压后保留官方目录结构。
 
+下载入口现已提供（需要安装 `requirements.txt` 中的 filelock/gdown）：
+
+```bash
+python tools/owod/download_data.py --benchmark both
+# 本机代理可加：--proxy http://127.0.0.1:10808
+```
+
+脚本下载官方 COCO ZIP 与 DINO ResNet-50，支持断点续传、目标锁、来源/哈希
+记录与安全解压。COCO 使用同一官方 S3 bucket 的有效 TLS 地址，不关闭证书
+校验。M 仍要求 ORE 合并发布版；2026-10-08 作者 Drive 文件夹为空，失败会
+明确记录。下载失败不能用自行合并的猜测标注代替作者原始输入。
+
 默认布局如下；原始数据也可以保存在另一块磁盘上，修改配置中的路径即可。
 
 ```text
@@ -40,6 +52,31 @@ data/
 `configs/data/owod.example.json` 是路径模板。可以复制为本地配置后修改
 `ore_root`、`coco_root`、`output_root`；相对路径按项目根目录解析，Windows
 绝对路径建议写成 `D:/datasets/coco`。本地配置中的数据必须是真实原始数据。
+
+已下载的 VOC 原始 TAR 可以这样整理：
+
+```bash
+python tools/owod/prepare_voc.py --downloads C:/Users/23642/Downloads
+```
+
+脚本分别保留三个 release 的全部原始目录：
+
+```text
+data/raw/voc/
+  voc2007-trainval/VOCdevkit/VOC2007/
+  voc2007-test/VOCdevkit/VOC2007/
+  voc2012-trainval/VOCdevkit/VOC2012/
+```
+
+随后严格按已固定的 M 作者清单，将所需 21,503 对 VOC 图像/XML 放到
+`data/raw/ore/JPEGImages` 和 `data/raw/ore/Annotations`。同盘优先使用硬链接，
+跨盘复制并核验哈希；原始 TAR 不移动、不删除，已有不同内容不覆盖。
+原始 VOC2012 TAR 包含 17,125 对图像/XML，而作者检测 trainval 清单使用
+11,540 张；额外原始文件保留在 release 目录，不进入自定义划分。
+
+`data/raw/ore/voc_source_manifest.json` 记录来源、原始清单哈希及检查结果；
+该文件是原始数据来源记录，不是 schema-3 的实验 split manifest。
+整理 VOC 不会虚构缺失的作者 COCO XML，也不会把不完整 M 数据标记为可训练。
 
 ## 2. 查看和生成划分
 

@@ -54,6 +54,8 @@ def get_args_parser():
     parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--activation-checkpointing', action='store_true',
+                        help='recompute encoder activations in backward to reduce peak memory')
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--lr_drop', default=40, type=int)
@@ -119,6 +121,29 @@ def get_args_parser():
     parser.add_argument('--distill-max-queries', default=20, type=int)
     parser.add_argument('--neighbor-scoped-lora', action='store_true',
                         help='train a temporary stage-level LoRA on the final decoder FFNs')
+    parser.add_argument('--graph-routed-adapter', action='store_true',
+                        help='persistent query-routed class adapters with GNN interference gates')
+    parser.add_argument('--graph-gnn-checkpoint', default='')
+    parser.add_argument('--graph-adapter-rank', type=int, default=8)
+    parser.add_argument('--graph-adapter-last-n', type=int, default=2)
+    parser.add_argument('--graph-risk-beta', type=float, default=2.0)
+    parser.add_argument('--graph-route-loss-coef', type=float, default=1.0)
+    parser.add_argument('--graph-routing', choices=('hard', 'soft'), default='hard')
+    parser.add_argument('--graph-localization', choices=('frozen', 'bbox-last'), default='frozen')
+    parser.add_argument('--discovery-scoring', choices=('hierarchical', 'focal'), default='hierarchical')
+    parser.add_argument('--graph-sketch-max-images', type=int, default=12)
+    parser.add_argument('--owod-discovery', action='store_true')
+    parser.add_argument('--discovery-no-message', action='store_true',
+                        help='capacity-matched affinity-graph ablation: self-loop context only')
+    parser.add_argument('--discovery-no-transfer', action='store_true')
+    parser.add_argument('--discovery-no-keep', action='store_true')
+    parser.add_argument('--discovery-capacity', type=int, default=16)
+    parser.add_argument('--discovery-min-support', type=float, default=3.)
+    parser.add_argument('--discovery-transfer-threshold', type=float, default=.8)
+    parser.add_argument('--discovery-warmup', type=int, default=1)
+    parser.add_argument('--discovery-top-k', type=int, default=5)
+    parser.add_argument('--discovery-saliency-threshold', type=float, default=.65)
+    parser.add_argument('--discovery-consistency-threshold', type=float, default=.5)
     parser.add_argument('--lora-rank', default=8, type=int)
     parser.add_argument('--lora-last-decoder-layers', default=2, type=int)
     parser.add_argument('--lora-train-detection-heads', action='store_true',
@@ -261,6 +286,9 @@ def main(args):
         run_config = vars(args).copy()
         profile = ({'method': args.paper_baseline, 'implementation': 'controlled_adaptation',
                     'paper_comparable': False} if args.paper_baseline else detector_profile_dict())
+        if args.owod_discovery:
+            profile = {'method': 'discovery', 'unknown_score': 'objectness * novelty * (1 - max_known)',
+                       'implementation': 'project_research_method', 'paper_baseline': False}
         run_config.update({'owod_detector_profile': profile})
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
@@ -288,7 +316,10 @@ def main(args):
     # currently the EE-0 flat-tree control, not an automatically induced tree.
     epoch_state = {'value': args.start_epoch}
     tree_head = None
-    if args.paper_baseline:
+    if args.owod_discovery:
+        from models.graph_local.discovery import build as build_discovery
+        model, criterion, postprocessors = build_discovery(args)
+    elif args.paper_baseline:
         from models.paper_baselines import build as build_paper_baseline
         model, criterion, postprocessors = build_paper_baseline(args)
         print('Controlled paper adaptation:', args.paper_baseline)
@@ -330,7 +361,19 @@ def main(args):
     # Load the previous-stage detector while it still has the plain Deformable
     # DETR module structure. The frozen teacher must not contain current-stage
     # LoRA factors or weights restored from an interrupted current-stage run.
-    if args.pretrained:
+    graph_source = None
+    if args.graph_routed_adapter:
+        from models.graph_local.routed_adapter import install_specs
+        graph_path = args.resume or args.pretrained
+        args.graph_adapter_specs = []
+        if graph_path:
+            graph_source = load_local_checkpoint(graph_path)
+            validate_checkpoint(args, graph_source, resume=bool(args.resume))
+            args.graph_adapter_specs = copy.deepcopy(getattr(graph_source['args'], 'graph_adapter_specs', []))
+            install_specs(model_without_ddp, args.graph_adapter_specs)
+            model_without_ddp.load_state_dict(graph_source['model'], strict=True)
+
+    if args.pretrained and not args.graph_routed_adapter:
         checkpoint = load_local_checkpoint(args.pretrained)
         validate_checkpoint(args, checkpoint)
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
@@ -365,7 +408,11 @@ def main(args):
             raise ValueError('teacher completion/distillation requires --pretrained')
         if args.old_class_distillation and not args.distill_old_class_ids:
             raise ValueError('--old-class-distillation requires --distill-old-class-ids')
-        teacher_model = copy.deepcopy(model_without_ddp).to(device)
+        if args.graph_routed_adapter:
+            from tools.owod.gnn_calibration import load_detector
+            teacher_model, _ = load_detector(args, Path(args.pretrained), device)
+        else:
+            teacher_model = copy.deepcopy(model_without_ddp).to(device)
         teacher_model.eval()
         for parameter in teacher_model.parameters():
             parameter.requires_grad_(False)
@@ -373,6 +420,34 @@ def main(args):
             'completion_classes': args.teacher_old_class_ids or [],
             'distillation_classes': args.distill_old_class_ids or [],
         }, sort_keys=True))
+
+    if args.graph_routed_adapter and args.owod_stage > 0:
+        from models.graph_local.routed_adapter import append_stage, configure_trainable
+        if not args.resume and args.owod_phase == 'increment':
+            from tools.owod.graph_adaptation import build_stage_spec
+            spec = build_stage_spec(model_without_ddp, criterion, args, args.pretrained)
+            append_stage(model_without_ddp, spec)
+            if args.owod_discovery:
+                from tools.owod.graph_adaptation import collect_promotion_features
+                means, route_means = collect_promotion_features(model_without_ddp, criterion, args)
+                model_without_ddp.promote(means, spec, route_means)
+            args.graph_adapter_specs.append(spec)
+        classifier_hook_handles = configure_trainable(
+            model_without_ddp, args.owod_current_class_ids, args.owod_known_class_ids,
+            finetune=args.owod_phase == 'finetune', localization=args.graph_localization)
+        criterion.weight_dict['loss_adapter_route'] = args.graph_route_loss_coef
+        print('Graph-routed adapter layout:', json.dumps(args.graph_adapter_specs, sort_keys=True))
+
+    if args.owod_discovery:
+        model_without_ddp.train_discovery()
+
+    if args.graph_routed_adapter and utils.is_main_process() and args.output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (output_dir / 'graph_adapter_config.json').open('w', encoding='utf-8') as handle:
+            json.dump({'method': 'graph-risk-routed-class-adapters',
+                       'task1': 'dense bootstrap', 'specs': args.graph_adapter_specs,
+                       'route_loss_coef': args.graph_route_loss_coef,
+                       'phase': args.owod_phase}, handle, indent=2)
 
     if args.neighbor_scoped_lora:
         wrappers = inject_decoder_lora(
@@ -501,7 +576,8 @@ def main(args):
             "lr": args.lr * args.class_embed_lr_mult,
             # Zero decay protects masked rows. Keep the same classifier decay
             # for the full-head LoRA diagnostic to isolate update scope.
-            "weight_decay": 0.0 if args.neighbor_scoped_lora else args.weight_decay,
+            "weight_decay": 0.0 if (args.neighbor_scoped_lora or
+                                     (args.graph_routed_adapter and args.owod_stage > 0)) else args.weight_decay,
         }
     ]
     if args.sgd:
@@ -538,7 +614,7 @@ def main(args):
                 raise ValueError('Resume requires an unconsolidated checkpoint from this method/stage')
             criterion.epoch = checkpoint['epoch']
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(
-            checkpoint['model'], strict=bool(args.paper_baseline))
+            checkpoint['model'], strict=bool(args.paper_baseline or args.graph_routed_adapter))
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
             print('Missing Keys: {}'.format(missing_keys))
@@ -606,9 +682,18 @@ def main(args):
         if completion_marker.is_file():
             archive_log_file(completion_marker)
     start_time = time.time()
+    discovery_teacher = None
+    if args.owod_discovery:
+        from models.graph_local.discovery import make_ema
+        discovery_teacher = make_ema(model_without_ddp)
+        if args.resume:
+            resumed = load_local_checkpoint(args.resume)
+            if 'discovery_ema' not in resumed:
+                raise ValueError('Discovery resume requires its saved EMA teacher')
+            discovery_teacher.load_state_dict(resumed['discovery_ema'], strict=True)
     for epoch in range(args.start_epoch, args.epochs):
         epoch_state['value'] = epoch
-        if args.paper_baseline:
+        if args.paper_baseline or args.owod_discovery:
             criterion.epoch = epoch
         if args.distributed:
             sampler_train.set_epoch(epoch)
@@ -630,7 +715,8 @@ def main(args):
             local_margin_coef=args.local_margin_coef,
             local_margin=args.local_margin,
             off_neighborhood_basis=off_neighborhood_basis,
-            off_projection_coef=args.off_projection_coef)
+            off_projection_coef=args.off_projection_coef,
+            discovery_teacher=discovery_teacher)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -644,6 +730,7 @@ def main(args):
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
                     'args': args,
+                    **({'discovery_ema': discovery_teacher.state_dict()} if discovery_teacher is not None else {}),
                 }, checkpoint_path)
 
         should_evaluate = (not getattr(args, 'skip_eval', False) and

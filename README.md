@@ -14,6 +14,7 @@
 
 ```bash
 python tools/owod/manage_data.py plan
+python tools/owod/download_data.py --benchmark both
 python tools/owod/manage_data.py check --config configs/data/owod.example.json
 python tools/owod/manage_data.py prepare --config configs/data/owod.example.json
 python tools/owod/manage_data.py verify --config configs/data/owod.example.json
@@ -26,6 +27,23 @@ python tools/owod/run_benchmark.py --help
 本项目 detector 与研究方法仍属于本地实现；采用作者 benchmark 不代表复现了
 ORE 或 OW-DETR 方法的论文数值。方法训练 recipe 必须明确记录。
 
+新增研究方法：[图风险引导的选择性 adapter](docs/graph-routed-adaptation.md)。
+使用 `run_benchmark.py --method graph-adapter` 接入官方七训练阶段和阶段间
+GNN 校准。GNN score 参与 query 分支门控与梯度更新，增量阶段冻结旧分支；
+默认 `--method control` 保留基础 detector 对照。
+
+[未知发现与类别转化方法](docs/owod-discovery-transition-design.md) 已接入
+`--method discovery`；`discovery-scratch` 为关闭匿名表示迁移的消融。
+完整数据下载、作者划分、三组任务链与 AP 对照入口：
+
+```bash
+python tools/owod/run_discovery_study.py --benchmark both
+```
+
+机制与 CUDA 检查已通过，正式 AP 尚未测得。ORE 作者数据入口当前为空时，
+脚本记录 M 来源不可用并继续 S，不创建替代划分。运行状态和日志保存在
+`output/discovery/full-study/`；数据/权重均断点续传，不加入 Git。
+
 旧 setting 的启动器、配置及说明文件已删除，清理记录见
 [project-cleanup.json](docs/project-cleanup.json)。已有日志、checkpoint 和外部源码保留。
 已有绘图代码位于 `tools/analysis/`，仅分析历史结果。
@@ -33,3 +51,9 @@ ORE 或 OW-DETR 方法的论文数值。方法训练 recipe 必须明确记录�
 Git 只保存源码、运行配置、作者 ImageSets、必要说明和许可证。
 PDF、图片、论文文稿、压缩包、权重、日志与临时输出均忽略；不要使用
 `git add -f` 将这些生成产物加入仓库。
+
+## 双 RTX 3090 服务器实验
+
+详见 [GPU 0/1 环境、数据迁移、自检与完整消融](docs/server-3090.md)。
+`python tools/owod/run_server_experiment.py` 核验计划；加 `--execute` 后依次运行
+硬路由、软路由及受限定位更新对照。

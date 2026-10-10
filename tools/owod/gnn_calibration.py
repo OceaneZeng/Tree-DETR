@@ -50,7 +50,7 @@ def build_calibration_dataset(coco_path: Path, annotation: Path,
                               lightweight: bool = False) -> CocoDetection:
     """Read train images with deterministic transforms for comparable losses."""
     return CocoDetection(
-        coco_path / "train2017",
+        coco_path,
         annotation,
         transforms=make_coco_transforms("val", lightweight=lightweight),
         return_masks=False,
@@ -103,8 +103,17 @@ def target_for_class(target: Mapping, class_id: int) -> dict:
 
 def load_detector(args, checkpoint_path: Path,
                   device: torch.device) -> tuple[torch.nn.Module, torch.nn.Module]:
-    model, criterion, _postprocessors = build_model(args)
     payload = load_local_checkpoint(checkpoint_path)
+    saved = payload.get('args') if isinstance(payload, Mapping) else None
+    # Reconstruct the actual completed detector, including persistent banks.
+    model_args = saved if saved is not None else args
+    if getattr(model_args, 'owod_discovery', False):
+        from models.graph_local.discovery import build as build_discovery
+        model, criterion, _postprocessors = build_discovery(model_args)
+    else:
+        model, criterion, _postprocessors = build_model(model_args)
+    from models.graph_local.routed_adapter import install_specs
+    install_specs(model, getattr(saved, 'graph_adapter_specs', []))
     state = payload.get("model", payload) if isinstance(payload, Mapping) else payload
     if not isinstance(state, Mapping):
         raise ValueError(f"Checkpoint is not a state dict: {checkpoint_path}")
@@ -136,6 +145,9 @@ def compute_class_gradient_sketch(
     loader = class_loader(dataset, class_id, batch_size, num_workers, max_images)
     model.eval()
     weights = target_base_weights(model, last_decoder_layers)
+    # Restored frozen method backbones still need gradients for controller sketches.
+    for parameter in weights:
+        parameter.requires_grad_(True)
     total = None
     matched = 0
     for samples, targets in loader:

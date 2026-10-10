@@ -24,6 +24,7 @@ from datasets.data_prefetcher import data_prefetcher
 from models.graph_local.distillation import old_class_distillation_losses
 from models.graph_local.losses import local_margin_loss, projection_loss
 from models.graph_local.lora import lora_delta_vector
+from models.graph_local.routed_adapter import mask_inactive_adapter_gradients
 from models.graph_local.pseudo_labels import select_teacher_pseudo_labels
 from models.owod_benchmark_eval import evaluate_author_benchmark
 
@@ -47,7 +48,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     local_margin_coef: float = 0.0,
                     local_margin: float = 1.0,
                     off_neighborhood_basis: torch.Tensor | None = None,
-                    off_projection_coef: float = 0.0):
+                    off_projection_coef: float = 0.0,
+                    discovery_teacher: torch.nn.Module | None = None):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(
@@ -55,7 +57,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         visible_meters={"lr", "class_error", "grad_norm", "loss", "loss_ce",
                         "loss_bbox", "loss_giou", "loss_distill_cls",
                         "loss_distill_bbox", "distill_queries", "pseudo_labels",
-                        "loss_local_margin", "loss_off_projection"})
+                        "loss_local_margin", "loss_off_projection", "loss_adapter_route",
+                        "adapter_active_fraction", "loss_objectness", "loss_unknown",
+                        "loss_discovery_route", "loss_discovery_consistency", "loss_affinity",
+                        "discovery_pseudo_count", "discovery_ignored_fraction"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -64,6 +69,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
     for _ in metric_logger.log_every(range(len(data_loader)), max(1, int(print_freq)), header):
+        optimizer.zero_grad(set_to_none=True)
         teacher_outputs = None
         if teacher is not None:
             with torch.no_grad():
@@ -80,6 +86,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 ground_truth_iou=teacher_ground_truth_iou,
                 max_per_image=teacher_max_per_image)
         outputs = model(samples)
+        if discovery_teacher is not None:
+            from models.graph_local.discovery_candidates import flip_samples
+            with torch.no_grad():
+                outputs['discovery_teacher'] = discovery_teacher(flip_samples(samples))
         loss_dict = criterion(outputs, completed_targets)
         weight_dict = dict(criterion.weight_dict)
         if local_margin_coef > 0:
@@ -121,13 +131,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        optimizer.zero_grad()
         losses.backward()
+        mask_inactive_adapter_gradients(model)
         if max_norm > 0:
             grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         else:
             grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
         optimizer.step()
+        if discovery_teacher is not None:
+            from models.graph_local.discovery import update_ema
+            current_model = model.module if hasattr(model, 'module') else model
+            current_model.observe_training(criterion.evidence)
+            update_ema(discovery_teacher, current_model)
+            metric_logger.update(discovery_pseudo_count=loss_dict['discovery_pseudo_count'].item(),
+                                 discovery_ignored_fraction=loss_dict['discovery_ignored_fraction'].item())
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
@@ -137,6 +154,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             metric_logger.update(distill_queries=float(distill_query_count))
         if teacher_completion:
             metric_logger.update(pseudo_labels=float(sum(pseudo_label_counts)))
+        # Release prior batch outputs before allocating the next forward graph.
+        del outputs, teacher_outputs, losses, loss_dict, loss_dict_reduced
+        del loss_dict_reduced_scaled, loss_dict_reduced_unscaled, losses_reduced_scaled
         samples, targets = prefetcher.next()
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

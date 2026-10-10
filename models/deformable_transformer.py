@@ -14,6 +14,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.utils.checkpoint import checkpoint
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 
 from util.misc import inverse_sigmoid
@@ -246,6 +247,7 @@ class DeformableTransformerEncoder(nn.Module):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
+        self.activation_checkpointing = False
 
     @staticmethod
     def get_reference_points(spatial_shapes, valid_ratios, device):
@@ -266,7 +268,11 @@ class DeformableTransformerEncoder(nn.Module):
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
-            output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+            if self.activation_checkpointing and torch.is_grad_enabled() and output.requires_grad:
+                output = checkpoint(layer, output, pos, reference_points, spatial_shapes,
+                                    level_start_index, padding_mask, use_reentrant=False)
+            else:
+                output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
 
         return output
 
@@ -301,6 +307,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
     def forward_ffn(self, tgt):
         tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+        if hasattr(self, 'graph_adapter'):
+            tgt2 = tgt2 + self.graph_adapter(tgt)
+        if hasattr(self, 'discovery_adapter'):
+            tgt2 = tgt2 + self.discovery_adapter(tgt)
         tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
         return tgt
@@ -389,7 +399,7 @@ def _get_activation_fn(activation):
 
 
 def build_deforamble_transformer(args):
-    return DeformableTransformer(
+    model = DeformableTransformer(
         d_model=args.hidden_dim,
         nhead=args.nheads,
         num_encoder_layers=args.enc_layers,
@@ -403,5 +413,7 @@ def build_deforamble_transformer(args):
         enc_n_points=args.enc_n_points,
         two_stage=args.two_stage,
         two_stage_num_proposals=args.num_queries)
+    model.encoder.activation_checkpointing = getattr(args, 'activation_checkpointing', False)
+    return model
 
 

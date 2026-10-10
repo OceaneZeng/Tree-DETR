@@ -1,6 +1,6 @@
 # M-OWODB / S-OWODB：当前唯一有效的实验协议
 
-更新日期：2026-10-08。本文取代旧的 DEUS、随机 COCO 20×4、
+更新日期：2026-10-09。本文取代旧的 DEUS、随机 COCO 20×4、
 `pilot_unverified` 和 D1–D4 实验 setting。历史日志保留，旧 setting 文件和启动器已删除；历史汇总工具位于 `tools/analysis/`。
 
 ## 原文定义与来源
@@ -99,7 +99,15 @@ S 的原始 OW-DETR 模型使用 top-50 detections、DINO ResNet-50 预训练。
 
 ## 数据准备与运行
 
-本机尚无完整 VOC/COCO 数据。M 必须取得 ORE 作者发布的 VOC-style
+截至 2026-10-09，本机完整 COCO2017、DINO ResNet-50 权重和 S schema-3
+manifest 已准备并核验。S 四任务的训练图片/实例数，以及各任务当前类别的
+测试图片/实例数，逐项与 OW-DETR Table 7 相符。S 发布的完整测试清单为
+4,952 张；Table 7 的各任务测试图片数是含该任务类别的图片数，不是需要
+自行生成的四个互斥测试集合。
+
+VOC 三个原始 TAR 已解压，M 作者清单需要的 21,503 对 VOC 图像/XML 已整理。
+M 的 COCO XML/图像合并尚不完整，尚无可训练的 M schema-3 manifest。
+M 必须取得 ORE 作者发布的完整 VOC-style
 `Annotations/`、`JPEGImages/`，不能仅凭 COCO2017 拼出 VOC Task 1。
 作者下载入口：
 <https://drive.google.com/drive/folders/1S5L-YmIiFMAKTs6nHMorB0Osz5iWI31k>。
