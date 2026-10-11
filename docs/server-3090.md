@@ -32,6 +32,13 @@ export PYTHONPATH="$PWD/models/ops:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 若使用系统已安装的 toolkit，将 CUDA_HOME 指向实际 CUDA 12.8 安装目录，
 不必再次安装。Linux 需可用的 C++ 编译器。不要复制 Windows 的 `.pyd` 扩展。
 
+已有 PyTorch 2.4.1 / CUDA runtime 12.1 环境时，可以先保留该环境并执行以下
+自检；torchvision 对应版本为 0.19.1。编译扩展需 CUDA 12.1 toolkit，不能
+直接照上面的 12.8 toolkit 命令安装。若当前没有匹配的 nvcc，可用
+`conda install -c nvidia cuda-toolkit=12.1` 安装，再将 CUDA_HOME 指向实际
+toolkit 目录。报告生成的 checkpoint 元数据读取已兼容缺少 safe_globals 的
+PyTorch 2.4；该兼容测试不代表已在服务器完整训练通过。
+
 双卡自检（真实 CUDA 扩展前后向、两轮 DDP、EMA、原型同步及受限定位更新）：
 
 ```bash

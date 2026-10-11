@@ -9,6 +9,17 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
+def load_checkpoint_metadata(path):
+    """Read trusted local experiment metadata without allocating model tensors."""
+    import torch
+    safe_globals = getattr(torch.serialization, 'safe_globals', None)
+    if safe_globals is None:
+        # Match main.load_local_checkpoint's PyTorch 2.4 compatibility path.
+        return torch.load(path, map_location='meta', weights_only=False)
+    with safe_globals([argparse.Namespace]):
+        return torch.load(path, map_location='meta', weights_only=True)
+
+
 def validate_plan_arguments(run, saved):
     """Check actual saved training arguments, including defaults, against launch."""
     from main import get_args_parser
@@ -41,8 +52,7 @@ def compare_runs(control, treatment):
             marker = json.loads((directory / 'training_complete.json').read_text())
             if marker['last_epoch'] != run['epochs'] - 1 or not (directory / 'checkpoint.pth').is_file():
                 raise ValueError(f'Incomplete training phase: {directory}')
-            with torch.serialization.safe_globals([argparse.Namespace]):
-                checkpoint = torch.load(directory / 'checkpoint.pth', map_location='meta', weights_only=True)
+            checkpoint = load_checkpoint_metadata(directory / 'checkpoint.pth')
             saved = copy.deepcopy(checkpoint['args'])
             validate_plan_arguments(run, saved)
             configure_run(saved)

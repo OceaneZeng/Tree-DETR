@@ -17,6 +17,17 @@ class Response(io.BytesIO):
         self.headers = {'Content-Range': f'bytes {offset}-{offset + len(payload) - 1}/{total}'}
 
 
+@pytest.mark.parametrize('legacy', [False, True])
+def test_checkpoint_metadata_loads_without_tensor_allocation(tmp_path, monkeypatch, legacy):
+    path = tmp_path / 'checkpoint.pth'
+    torch.save({'args': argparse.Namespace(epochs=50), 'model': {'weight': torch.ones(3)}}, path)
+    if legacy:
+        monkeypatch.delattr(torch.serialization, 'safe_globals', raising=False)
+    checkpoint = validate_discovery.load_checkpoint_metadata(path)
+    assert checkpoint['args'].epochs == 50
+    assert checkpoint['model']['weight'].device.type == 'meta'
+
+
 def test_download_resumes_and_reuses_verified_source(tmp_path, monkeypatch):
     target = tmp_path / 'source.zip'
     target.with_suffix('.zip.part').write_bytes(b'abc')
