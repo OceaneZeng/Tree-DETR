@@ -174,6 +174,7 @@ def main(argv=None):
     env = os.environ.copy()
     env['PYTHONPATH'] = str(ROOT / 'models/ops') + os.pathsep + str(ROOT) + os.pathsep + env.get('PYTHONPATH', '')
     if args.gpus:
+        env['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
         env['CUDA_VISIBLE_DEVICES'] = args.gpus
     for run in plan['runs']:
         directory = Path(run['output_dir'])

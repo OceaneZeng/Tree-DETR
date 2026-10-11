@@ -23,6 +23,7 @@ export CUDA_HOME="$CONDA_PREFIX"
 export PATH="$CUDA_HOME/bin:$PATH"
 nvcc --version
 export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export TORCH_CUDA_ARCH_LIST=8.6
 export MAX_JOBS=4
 python -m pip install --no-build-isolation ./models/ops
@@ -48,6 +49,14 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 tools/owod/ser
 此自检使用随机小输入，仅证明计算与通信路径，不是 AP 验证。执行长实验时
 入口会先自动运行该检查，失败则停止。本地只有一张卡，未声称已经通过服务器
 双卡 NCCL 实测。
+
+混合型号服务器的 CUDA 默认编号可能与 `nvidia-smi` 不同。两个训练入口在
+显式选择 GPU 时固定 `CUDA_DEVICE_ORDER=PCI_BUS_ID`；直接运行自检时也应
+导出该变量。启动前用下面命令确认逻辑设备 0、1 均为 RTX 3090：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1 python -c "import torch; print([(i, torch.cuda.get_device_name(i)) for i in range(torch.cuda.device_count())])"
+```
 
 ## 数据迁移
 

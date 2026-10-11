@@ -50,6 +50,8 @@ def main(argv=None):
             or args.batch_size < 1 or args.workers < 0):
         parser.error('Require two distinct GPU indices, positive batch, nonnegative workers')
     env = os.environ.copy()
+    # Match numeric GPU selection to PCI ordering on mixed-GPU servers.
+    env['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
     env['CUDA_VISIBLE_DEVICES'] = args.gpus
     env.setdefault('OMP_NUM_THREADS', '2')
     env['PYTHONPATH'] = os.pathsep.join([str(ROOT / 'models/ops'), str(ROOT), env.get('PYTHONPATH', '')])

@@ -31,6 +31,9 @@ class CocoEvaluator(object):
     def __init__(self, coco_gt, iou_types):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
+        # Recent pycocotools requires this optional metadata in loadRes.
+        # Normalize only the private copy; keep hashed source annotations intact.
+        coco_gt.dataset.setdefault('info', {})
         self.coco_gt = coco_gt
 
         self.iou_types = iou_types
