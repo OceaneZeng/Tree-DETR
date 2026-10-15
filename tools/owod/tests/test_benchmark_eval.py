@@ -15,7 +15,7 @@ from tools.owod.benchmark_spec import specification
 
 
 class AuthorEvaluationTests(unittest.TestCase):
-    def evaluate(self, objects, labels, boxes, scores=None, mode='integral'):
+    def evaluate(self, objects, labels, boxes, scores=None, mode='integral', screening=False):
         anns = [{'category_id': label, 'voc_bbox': box, 'difficult': difficult}
                 for label, box, difficult in objects]
         coco = SimpleNamespace(imgs={1: {'owod_source_id': 'one'}}, imgToAnns={1: anns})
@@ -23,7 +23,13 @@ class AuthorEvaluationTests(unittest.TestCase):
                             'boxes': torch.tensor(boxes, dtype=torch.float64).reshape(-1, 4),
                             'scores': torch.tensor(scores if scores is not None else [.9] * len(labels))}}
         spec = {**specification('m-owodb'), 'image_source_ids': ['one'], 'ap_mode': mode}
+        spec['known_only_screening'] = screening
         return evaluate_author_benchmark(predictions, coco, [1], [], [1], spec)
+
+    def test_screening_reports_known_ap_without_unknown_claims(self):
+        stats = self.evaluate([(1, [1, 1, 10, 10], False)],
+                              [1, 91], [[0, 0, 10, 10], [20, 0, 30, 10]], screening=True)
+        self.assertEqual(stats, {'known_ap50': 1., 'current_ap50': 1.})
 
     def test_unknown_matching_is_one_to_one(self):
         known, unknown = [1, 1, 10, 10], [21, 1, 30, 10]

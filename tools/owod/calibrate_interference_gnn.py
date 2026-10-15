@@ -200,9 +200,17 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("Calibration requires at least two source classes")
     checked_manifest, files = stage_files(
         args.manifest, args.stage, allow_unverified=args.allow_unverified_protocol)
+    if getattr(args, 'owod_screening', ''):
+        from tools.owod.screening_data import screening_files
+        checked_manifest, files = screening_files(args.manifest, Path(args.owod_screening), args.stage)
+        checked_manifest = {**checked_manifest, 'paper_comparable': False,
+                            'validation_mode': 'training_only_screen'}
     annotation = files["train"]
     checkpoint_payload = load_local_checkpoint(args.checkpoint)
     checkpoint_args = checkpoint_payload.get('args')
+    screen_hash = file_sha256(Path(args.owod_screening)) if getattr(args, 'owod_screening', '') else None
+    if getattr(checkpoint_args, 'owod_screening_sha256', None) != screen_hash:
+        raise ValueError('Calibration cannot mix screening and full-data checkpoints')
     expected_phase = 'increment' if args.stage == 0 else 'finetune'
     if (checkpoint_args is None
             or getattr(checkpoint_args, 'owod_manifest_sha256', None) != file_sha256(args.manifest)
@@ -213,6 +221,8 @@ def run(args: argparse.Namespace) -> int:
     identity = {'checkpoint_sha256': file_sha256(args.checkpoint),
                 'manifest_sha256': file_sha256(args.manifest),
                 'annotation_sha256': file_sha256(annotation)}
+    if screen_hash:
+        identity['screening_sha256'] = screen_hash
     if args.force:
         print("--force ignores existing sketch and harm-row cache files")
 

@@ -4,7 +4,8 @@ import torch
 
 from models.graph_local.gnn import load_gnn_checkpoint, compress_gradient_sketches
 from models.graph_local.lora import target_base_weights
-from tools.owod.protocol import file_sha256, stage_files
+from tools.owod.protocol import file_sha256
+from tools.owod.screening_data import experiment_files
 
 
 def validate_gnn_metadata(metadata, args, source_checkpoint):
@@ -20,6 +21,8 @@ def validate_gnn_metadata(metadata, args, source_checkpoint):
     for key, value in expected.items():
         if metadata.get(key) != value:
             raise ValueError(f'GNN provenance mismatch: {key}; recalibrate the preceding task')
+    if metadata.get('screening_sha256') != getattr(args, 'owod_screening_sha256', None):
+        raise ValueError('GNN screening/full-data provenance mismatch')
     if set(metadata.get('training_classes', [])) != set(args.owod_previous_class_ids):
         raise ValueError('GNN calibration must use only the preceding task known classes')
 
@@ -29,7 +32,7 @@ def build_stage_spec(model, criterion, args, source_checkpoint):
     from tools.owod.gnn_calibration import build_calibration_dataset, compute_gradient_sketches
     gnn, metadata = load_gnn_checkpoint(Path(args.graph_gnn_checkpoint), device='cpu')
     validate_gnn_metadata(metadata, args, source_checkpoint)
-    manifest, files = stage_files(Path(args.owod_manifest), args.owod_stage)
+    manifest, files = experiment_files(args, args.owod_stage)
     current = list(args.owod_current_class_ids)
     old = list(args.owod_previous_class_ids)
     # Released balanced memory supplies old-class controller evidence. It never
@@ -74,7 +77,7 @@ def build_stage_spec(model, criterion, args, source_checkpoint):
 def collect_promotion_features(model, criterion, args):
     """Use only newly released train labels; no historical instance overlap required."""
     from tools.owod.gnn_calibration import build_calibration_dataset, class_loader, move_targets, target_for_class
-    manifest, files = stage_files(Path(args.owod_manifest), args.owod_stage)
+    manifest, files = experiment_files(args, args.owod_stage)
     dataset = build_calibration_dataset(Path(manifest['image_root']), files['increment_train'])
     means, route_means = {}, {}
     model.eval()

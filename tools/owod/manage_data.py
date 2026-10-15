@@ -190,7 +190,12 @@ def prepare_dataset(protocol, source, directory, decode_images=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('plan', 'check', 'prepare', 'verify'))
+    parser.add_argument('command', choices=('plan', 'check', 'prepare', 'verify', 'prepare-screen', 'verify-screen'))
+    parser.add_argument('--manifest', type=Path, help='Parent schema-3 manifest for diagnostic screening')
+    parser.add_argument('--screen-output', type=Path, help='Separate generated diagnostic data directory')
+    parser.add_argument('--train-images', type=int, default=2000)
+    parser.add_argument('--val-images', type=int, default=400)
+    parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--benchmark', choices=(*PROTOCOLS, 'both'), default='both')
     parser.add_argument('--config', type=Path, help='JSON paths, relative to the project root')
     parser.add_argument('--ore-root', type=Path, help='Original ORE release (Annotations/JPEGImages)')
@@ -199,6 +204,22 @@ def main(argv=None):
     parser.add_argument('--decode-images', action='store_true', help='Additionally verify image decoding')
     parser.add_argument('--report', type=Path, help='Save the JSON result as well as printing it')
     args = parser.parse_args(argv)
+    if args.command in ('prepare-screen', 'verify-screen'):
+        if not args.manifest or not args.screen_output:
+            parser.error('Screen data requires --manifest and --screen-output')
+        from tools.owod.screening_data import prepare_screen, screening_files
+        if args.command == 'prepare-screen':
+            manifest = read_json(args.manifest)
+            verification = verify_dataset(args.manifest.resolve().parent, manifest['protocol'])
+            if verification.get('ready') is False:
+                raise ValueError('Parent dataset verification failed')
+            path = prepare_screen(args.manifest, args.screen_output, args.train_images, args.val_images, args.seed)
+        else:
+            path = args.screen_output / 'screening.json'
+        for stage in range(2):
+            screening_files(args.manifest, path, stage)
+        print(json.dumps({'ready': True, 'paper_comparable': False, 'screening': str(path)}))
+        return 0
     config = read_json(args.config.resolve()) if args.config else {}
     def root(value):
         path = Path(value)

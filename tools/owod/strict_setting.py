@@ -62,6 +62,19 @@ def configure_run(args):
     args.owod_max_detections = 50 if (manifest['protocol'] == 's-owodb'
                                    or getattr(args, 'owod_recipe', None) == 'ow-detr-paper') else 100
     args.paper_comparable_protocol = True
+    if getattr(args, 'owod_screening', ''):
+        from tools.owod.screening_data import screening_files
+        from tools.owod.protocol import read_json
+        _, screen_files = screening_files(Path(args.owod_manifest), Path(args.owod_screening), args.owod_stage)
+        screen = read_json(Path(args.owod_screening))
+        if args.seed != screen['seed'] or not getattr(args, 'owod_discovery', False):
+            raise ValueError('Screen requires discovery method and the registered paired seed')
+        args.owod_screening_sha256 = file_sha256(Path(args.owod_screening))
+        args.train_ann = str(screen_files['increment_train' if phase == 'increment' else 'train'])
+        args.val_ann = str(screen_files['full_val'])
+        args.paper_comparable_protocol = False
+        args.owod_evaluation = {**manifest['evaluation'], 'known_only_screening': True,
+                               'image_source_ids': screen['heldout_source_ids']}
     if getattr(args, 'owod_discovery', False):
         if (args.discovery_capacity < 1 or args.discovery_top_k < 1 or args.discovery_warmup < 0
                 or not math.isfinite(args.discovery_min_support) or args.discovery_min_support <= 0
@@ -94,6 +107,8 @@ def validate_checkpoint(args, checkpoint, resume=False):
     if not getattr(args, 'owod_manifest', ''):
         return
     saved = checkpoint.get('args')
+    if getattr(saved, 'owod_screening_sha256', None) != getattr(args, 'owod_screening_sha256', None):
+        raise ValueError('Cannot mix screening and full benchmark checkpoints or different screening data')
     if (saved is None or getattr(saved, 'owod_manifest_sha256', None) != args.owod_manifest_sha256):
         raise ValueError('Checkpoint belongs to an old/custom/different benchmark manifest')
     if getattr(saved, 'owod_recipe', None) != args.owod_recipe:

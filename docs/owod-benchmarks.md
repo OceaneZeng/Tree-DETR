@@ -1,5 +1,9 @@
 # M-OWODB / S-OWODB：当前唯一有效的实验协议
 
+2026-10-15 补充：用户授权先进行独立的小数据方法筛选，再从头启动优胜方法的
+正式全量训练。诊断流程见 [owod-screening.md](owod-screening.md)；它不替换
+本文的作者协议，不使用正式测试集调参，诊断检查点禁止用于初始化正式训练。
+
 更新日期：2026-10-09。本文取代旧的 DEUS、随机 COCO 20×4、
 `pilot_unverified` 和 D1–D4 实验 setting。历史日志保留，旧 setting 文件和启动器已删除；历史汇总工具位于 `tools/analysis/`。
 

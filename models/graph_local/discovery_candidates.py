@@ -73,17 +73,34 @@ def view_matches(outputs, teacher):
     boxes[..., 0] = 1 - boxes[..., 0]
     matches, confidence = [], []
     for batch in range(boxes.shape[0]):
-        overlaps = box_iou(box_cxcywh_to_xyxy(outputs['pred_boxes'][batch]),
-                           box_cxcywh_to_xyxy(boxes[batch]))[0]
-        source, target = linear_sum_assignment(-overlaps.cpu().numpy())
-        mapping = torch.full((overlaps.shape[0],), -1, device=boxes.device, dtype=torch.long)
-        score = overlaps.new_zeros(overlaps.shape[0])
-        source = torch.as_tensor(source, device=boxes.device)
-        target = torch.as_tensor(target, device=boxes.device)
-        mapping[source] = target
-        cosine = F.cosine_similarity(outputs['query_features'][batch, source],
-                                     teacher['query_features'][batch, target])
-        score[source] = overlaps[source, target] * cosine.clamp(0, 1)
+        corners, valid_ids = [], []
+        for name, prediction, features in (
+                ('student', outputs['pred_boxes'][batch], outputs['query_features'][batch]),
+                ('teacher', boxes[batch], teacher['query_features'][batch])):
+            if not torch.isfinite(prediction).all() or not torch.isfinite(features).all():
+                raise ValueError(f'Cross-view matching: non-finite {name} boxes/features in batch {batch}')
+            # Convert before geometry arithmetic to avoid half-precision collapse.
+            # Even finite positive cxcywh sizes can round to zero in xyxy.
+            xyxy = box_cxcywh_to_xyxy(prediction.float())
+            size = xyxy[:, 2:] - xyxy[:, :2]
+            valid = (size > 0).all(-1) & (size.prod(-1) > 0)
+            corners.append(xyxy)
+            valid_ids.append(torch.where(valid)[0])
+        student_ids, teacher_ids = valid_ids
+        mapping = torch.full((len(corners[0]),), -1, device=boxes.device, dtype=torch.long)
+        score = corners[0].new_zeros(len(corners[0]))
+        if student_ids.numel() and teacher_ids.numel():
+            overlaps = box_iou(corners[0][student_ids], corners[1][teacher_ids])[0]
+            if not torch.isfinite(overlaps).all():
+                raise ValueError(f'Cross-view matching: non-finite IoU in batch {batch}')
+            source, target = linear_sum_assignment(-overlaps.cpu().numpy())
+            source = torch.as_tensor(source, device=boxes.device)
+            target = torch.as_tensor(target, device=boxes.device)
+            queries, partners = student_ids[source], teacher_ids[target]
+            mapping[queries] = partners
+            cosine = F.cosine_similarity(outputs['query_features'][batch, queries].float(),
+                                         teacher['query_features'][batch, partners].float())
+            score[queries] = overlaps[source, target] * cosine.clamp(0, 1)
         matches.append(mapping)
         confidence.append(score)
     return torch.stack(matches), torch.stack(confidence), boxes
@@ -119,6 +136,7 @@ def mine_candidates(outputs, targets, indices, known_ids, teacher=None, top_k=5,
         confident = eligible & (saliency[batch] >= saliency_threshold)
         confident &= consistency[batch] >= consistency_threshold
         if teacher_saliency is not None:
+            confident &= maps[batch] >= 0
             confident &= teacher_saliency[batch, maps[batch].clamp_min(0)] >= saliency_threshold
         ranked = torch.where(confident)[0]
         quality = saliency[batch] * consistency[batch] * semantic[batch]
@@ -140,6 +158,7 @@ def mine_candidates(outputs, targets, indices, known_ids, teacher=None, top_k=5,
         # Lack of a semantic label is insufficient evidence of background.
         background[batch] = eligible & (saliency[batch] < .15)
         if teacher is not None:
+            background[batch] &= maps[batch] >= 0
             background[batch] &= teacher_saliency[batch, maps[batch].clamp_min(0)] < .15
     return {'pseudo': pseudo, 'background': background, 'weights': weights,
             'matches': maps, 'teacher_boxes': teacher_boxes, 'consistency': consistency,

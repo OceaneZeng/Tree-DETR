@@ -19,6 +19,7 @@ from tools.owod.protocol import file_sha256, read_json, stage_files
 
 def build_plan(args):
     manifest, _ = stage_files(args.manifest, 0)
+    screening = getattr(args, 'owod_screening', None)
     if args.recipe == 'ore-paper':
         if manifest['protocol'] != 'm-owodb':
             raise ValueError('ORE 2021 does not specify S-OWODB')
@@ -39,8 +40,17 @@ def build_plan(args):
         raise FileNotFoundError(args.backbone_weights)
     image_root = Path(manifest['image_root'])
     method = getattr(args, 'method', 'control')
+    if screening:
+        from tools.owod.screening_data import screening_files
+        screening_files(args.manifest, screening, 0)
+        screening_files(args.manifest, screening, 1)
+        if args.recipe != 'ow-detr-paper' or method != 'discovery':
+            raise ValueError('Screening supports the paired discovery variants only')
+        epochs, ft_epochs = args.screen_increment_epochs, args.screen_finetune_epochs
+        if epochs < 2 or ft_epochs < 1 or args.screen_eval_interval < 1:
+            raise ValueError('Screening requires >=2 increment epochs, >=1 finetune epoch/eval interval')
     runs, previous = [], None
-    for stage in range(4):
+    for stage in range(2 if screening else 4):
         gnn_checkpoint = None
         if method != 'control' and stage > 0:
             calibration_dir = args.output_dir / manifest['protocol'] / f'seed_{args.seed}' / 'gnn' / f'stage_{stage - 1}'
@@ -53,6 +63,8 @@ def build_plan(args):
                              '--seed', str(args.seed), '--num_workers', str(args.num_workers),
                              '--last-decoder-layers', str(args.graph_adapter_last_n),
                              '--probe-rank', str(args.graph_adapter_rank)]})
+            if screening:
+                runs[-1]['command'] += ['--owod-screening', str(screening)]
         _, files = stage_files(args.manifest, stage)
         for key in ('increment_train', 'train', 'full_val'):
             payload = read_json(files[key])
@@ -80,6 +92,9 @@ def build_plan(args):
                         '--eval_interval', '1']
             if getattr(args, 'activation_checkpointing', False):
                 command += ['--activation-checkpointing']
+            if screening:
+                command += ['--owod-screening', str(screening)]
+                command[command.index('--eval_interval') + 1] = str(args.screen_eval_interval)
             if args.recipe == 'ore-paper':
                 if args.batch_size * args.nproc_per_node != 8:
                     raise ValueError('ORE Appendix F requires effective batch size 8')
@@ -115,7 +130,7 @@ def build_plan(args):
             runs.append({'stage': stage, 'phase': phase, 'command': command,
                          'output_dir': str(directory), 'epochs': n_epochs})
             previous = directory / 'checkpoint.pth'
-    return {'protocol': manifest['protocol'], 'manifest_sha256': file_sha256(args.manifest),
+    result = {'protocol': manifest['protocol'], 'manifest_sha256': file_sha256(args.manifest),
             'backbone_weights_sha256': file_sha256(args.backbone_weights) if args.backbone_weights else None,
             'recipe': args.recipe, 'recipe_source': ('ORE Appendix F; separate finetuning schedule supplied explicitly'
                                                     if args.recipe == 'ore-paper' else 'OW-DETR Appendix D'),
@@ -123,11 +138,19 @@ def build_plan(args):
                       else 'Graph risk-routed class adapters (project method)' if method == 'graph-adapter'
                       else 'Local Deformable DETR control (not an ORE/OW-DETR method reproduction)'),
             'runs': runs}
+    if screening:
+        result.update(screening_sha256=file_sha256(screening), paper_comparable=False,
+                      schedule_source='User-authorized diagnostic budget; not paper training schedule')
+    return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
+    parser.add_argument('--owod-screening', type=Path)
+    parser.add_argument('--screen-increment-epochs', type=int, default=8)
+    parser.add_argument('--screen-finetune-epochs', type=int, default=4)
+    parser.add_argument('--screen-eval-interval', type=int, default=4)
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--recipe', required=True, choices=('ore-paper', 'ow-detr-paper'))
     parser.add_argument('--finetune-epochs', type=int)
@@ -154,6 +177,8 @@ def main(argv=None):
     if args.nproc_per_node < 1 or args.batch_size < 1 or (args.finetune_epochs is not None and args.finetune_epochs < 1):
         raise ValueError('Process count, batch size and finetuning epochs must be positive')
     args.manifest = args.manifest.resolve()
+    if args.owod_screening:
+        args.owod_screening = args.owod_screening.resolve()
     args.output_dir = args.output_dir.resolve()
     if args.backbone_weights:
         args.backbone_weights = args.backbone_weights.resolve()

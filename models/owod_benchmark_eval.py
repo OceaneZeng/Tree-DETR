@@ -113,6 +113,8 @@ def evaluate_author_benchmark(predictions, coco, known_ids, previous_ids, curren
         if ids:
             group_ap[name] = float(np.mean([ap[c] for c in ids]))
     result = {f'{name.lower()}_ap50': value for name, value in group_ap.items()}
+    if specification.get('known_only_screening'):
+        return result
     result.update({'unknown_gt': float(unknown_gt), 'unknown_predictions': float(unknown_count)})
     if unknown_gt:
         result.update({'u_recall': unknown_tp / unknown_gt,
