@@ -20,6 +20,10 @@ from tools.owod.protocol import file_sha256, read_json, stage_files
 def build_plan(args):
     manifest, _ = stage_files(args.manifest, 0)
     screening = getattr(args, 'owod_screening', None)
+    shared = getattr(args, 'screen_shared_task1', None)
+    shared_gnn = getattr(args, 'screen_shared_gnn', None)
+    if bool(shared) != bool(shared_gnn) or (shared and not screening):
+        raise ValueError('Shared Task 1/GNN inputs require screening and both artifact paths')
     if args.recipe == 'ore-paper':
         if manifest['protocol'] != 'm-owodb':
             raise ValueError('ORE 2021 does not specify S-OWODB')
@@ -49,10 +53,17 @@ def build_plan(args):
         epochs, ft_epochs = args.screen_increment_epochs, args.screen_finetune_epochs
         if epochs < 2 or ft_epochs < 1 or args.screen_eval_interval < 1:
             raise ValueError('Screening requires >=2 increment epochs, >=1 finetune epoch/eval interval')
-    runs, previous = [], None
-    for stage in range(2 if screening else 4):
+    shared_identity = None
+    if shared:
+        from tools.owod.shared_task1 import validate_inputs
+        shared_identity = validate_inputs(args.manifest, screening, shared, shared_gnn,
+                                          args.backbone_weights, args.seed)
+    runs, previous = [], shared
+    for stage in (range(1, 2) if shared else range(2 if screening else 4)):
         gnn_checkpoint = None
-        if method != 'control' and stage > 0:
+        if shared:
+            gnn_checkpoint = shared_gnn
+        elif method != 'control' and stage > 0:
             calibration_dir = args.output_dir / manifest['protocol'] / f'seed_{args.seed}' / 'gnn' / f'stage_{stage - 1}'
             gnn_checkpoint = calibration_dir / f'gnn_stage{stage - 1}.pt'
             runs.append({'kind': 'calibration', 'stage': stage - 1, 'phase': 'calibration',
@@ -95,6 +106,8 @@ def build_plan(args):
             if screening:
                 command += ['--owod-screening', str(screening)]
                 command[command.index('--eval_interval') + 1] = str(args.screen_eval_interval)
+            if shared:
+                command += ['--screen-branch-checkpoint', str(shared)]
             if args.recipe == 'ore-paper':
                 if args.batch_size * args.nproc_per_node != 8:
                     raise ValueError('ORE Appendix F requires effective batch size 8')
@@ -141,6 +154,8 @@ def build_plan(args):
     if screening:
         result.update(screening_sha256=file_sha256(screening), paper_comparable=False,
                       schedule_source='User-authorized diagnostic budget; not paper training schedule')
+    if shared_identity:
+        result['shared_task1'] = shared_identity
     return result
 
 
@@ -148,6 +163,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
     parser.add_argument('--owod-screening', type=Path)
+    parser.add_argument('--screen-shared-task1', type=Path)
+    parser.add_argument('--screen-shared-gnn', type=Path)
     parser.add_argument('--screen-increment-epochs', type=int, default=8)
     parser.add_argument('--screen-finetune-epochs', type=int, default=4)
     parser.add_argument('--screen-eval-interval', type=int, default=4)
@@ -179,6 +196,9 @@ def main(argv=None):
     args.manifest = args.manifest.resolve()
     if args.owod_screening:
         args.owod_screening = args.owod_screening.resolve()
+    for field in ('screen_shared_task1', 'screen_shared_gnn'):
+        if getattr(args, field):
+            setattr(args, field, getattr(args, field).resolve())
     args.output_dir = args.output_dir.resolve()
     if args.backbone_weights:
         args.backbone_weights = args.backbone_weights.resolve()

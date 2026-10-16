@@ -62,6 +62,14 @@ def configure_run(args):
     args.owod_max_detections = 50 if (manifest['protocol'] == 's-owodb'
                                    or getattr(args, 'owod_recipe', None) == 'ow-detr-paper') else 100
     args.paper_comparable_protocol = True
+    if getattr(args, 'screen_branch_checkpoint', ''):
+        if not getattr(args, 'owod_screening', '') or args.owod_stage != 1:
+            raise ValueError('Shared-parent branching is restricted to screening Task 2')
+        args.screen_branch_checkpoint_sha256 = file_sha256(Path(args.screen_branch_checkpoint))
+        args.screen_branch_gnn_sha256 = file_sha256(Path(args.graph_gnn_checkpoint))
+        if args.owod_phase == 'increment' and (
+                not args.pretrained or file_sha256(Path(args.pretrained)) != args.screen_branch_checkpoint_sha256):
+            raise ValueError('Task 2 must initialize from the pinned common parent')
     if getattr(args, 'owod_screening', ''):
         from tools.owod.screening_data import screening_files
         from tools.owod.protocol import read_json
@@ -107,6 +115,22 @@ def validate_checkpoint(args, checkpoint, resume=False):
     if not getattr(args, 'owod_manifest', ''):
         return
     saved = checkpoint.get('args')
+    shared_parent = bool(getattr(args, 'screen_branch_checkpoint_sha256', None))
+    branching = (shared_parent and not resume and args.owod_stage == 1
+                 and args.owod_phase == 'increment' and getattr(saved, 'owod_stage', None) == 0
+                 and getattr(saved, 'owod_phase', None) == 'increment'
+                 and not getattr(saved, 'graph_adapter_specs', []))
+    if shared_parent and (not getattr(args, 'owod_screening_sha256', None) or args.owod_stage != 1
+                          or not getattr(args, 'owod_discovery', False)
+                          or not getattr(args, 'graph_routed_adapter', False)):
+        raise ValueError('Shared-parent branching is restricted to screening Task 2')
+    if not branching:
+        for field in ('screen_branch_checkpoint_sha256', 'screen_branch_gnn_sha256'):
+            if getattr(saved, field, None) != getattr(args, field, None):
+                raise ValueError(f'Shared-parent checkpoint chain mismatch: {field}')
+    elif (not args.pretrained or file_sha256(Path(args.pretrained)) != args.screen_branch_checkpoint_sha256
+          or getattr(saved, 'seed', None) != args.seed):
+        raise ValueError('Shared Task 1 checkpoint or seed mismatch')
     if getattr(saved, 'owod_screening_sha256', None) != getattr(args, 'owod_screening_sha256', None):
         raise ValueError('Cannot mix screening and full benchmark checkpoints or different screening data')
     if (saved is None or getattr(saved, 'owod_manifest_sha256', None) != args.owod_manifest_sha256):
@@ -130,9 +154,9 @@ def validate_checkpoint(args, checkpoint, resume=False):
     if bool(getattr(saved, 'graph_routed_adapter', False)) != bool(getattr(args, 'graph_routed_adapter', False)):
         raise ValueError('Cannot switch graph adapter method within the checkpoint chain')
     if getattr(args, 'graph_routed_adapter', False):
-        if getattr(saved, 'graph_routing', 'hard') != getattr(args, 'graph_routing', 'hard'):
+        if not branching and getattr(saved, 'graph_routing', 'hard') != getattr(args, 'graph_routing', 'hard'):
             raise ValueError('Graph adapter checkpoint cannot change graph_routing')
-        if getattr(saved, 'graph_localization', 'frozen') != getattr(args, 'graph_localization', 'frozen'):
+        if not branching and getattr(saved, 'graph_localization', 'frozen') != getattr(args, 'graph_localization', 'frozen'):
             raise ValueError('Graph adapter checkpoint cannot change graph_localization')
         for field in ('graph_adapter_rank', 'graph_adapter_last_n', 'graph_risk_beta',
                       'graph_route_loss_coef', 'graph_sketch_max_images'):

@@ -32,23 +32,28 @@ def benchmark_command(args, variant, screening=True):
                '--batch-size', str(args.batch_size), '--num-workers', str(args.workers),
                '--seed', str(args.seed), '--activation-checkpointing']
     if screening:
-        command += ['--owod-screening', str(args.output / 'data/screening.json'),
+        command += ['--owod-screening', str(getattr(args, 'screening_path', None) or args.output / 'data/screening.json'),
                     '--screen-increment-epochs', str(args.increment_epochs),
                     '--screen-finetune-epochs', str(args.finetune_epochs),
                     '--screen-eval-interval', str(args.eval_interval)]
+        if getattr(args, 'screen_shared_task1', None):
+            command += ['--screen-shared-task1', str(args.screen_shared_task1),
+                        '--screen-shared-gnn', str(args.screen_shared_gnn)]
     if args.resume:
         command += ['--resume']
     return command
 
 
-def select_winner(root, protocol, seed, epochs, screen_hash, increment_epochs=8):
+def select_winner(root, protocol, seed, epochs, screen_hash, increment_epochs=8, shared_identity=None):
     """Use only completed final Task 2 finetuning, never best test epoch."""
     rows = []
     for variant in VARIANTS:
         base = root / 'screen' / variant / protocol / f'seed_{seed}'
         seconds = 0
-        for stage, phase, expected_epochs in [(0, 'increment', increment_epochs),
-                                              (1, 'increment', increment_epochs), (1, 'finetune', epochs)]:
+        phases = [(1, 'increment', increment_epochs), (1, 'finetune', epochs)]
+        if not shared_identity:
+            phases.insert(0, (0, 'increment', increment_epochs))
+        for stage, phase, expected_epochs in phases:
             directory = base / f'stage_{stage}' / phase
             complete = read_json(directory / 'training_complete.json')
             config = read_json(directory / 'run_config.json')
@@ -57,6 +62,10 @@ def select_winner(root, protocol, seed, epochs, screen_hash, increment_epochs=8)
                     or config.get('seed') != seed or config.get('paper_comparable_protocol') is not False
                     or (config.get('graph_routing'), config.get('graph_localization')) != VARIANTS[variant]):
                 raise ValueError(f'{variant}: incomplete or mismatched screening result')
+            if shared_identity and (
+                    config.get('screen_branch_checkpoint_sha256') != shared_identity['checkpoint_sha256']
+                    or config.get('screen_branch_gnn_sha256') != shared_identity['gnn_sha256']):
+                raise ValueError(f'{variant}: common parent/GNN mismatch')
             seconds += complete['training_time_seconds']
         metrics = [json.loads(line) for line in (directory / 'metrics.jsonl').read_text().splitlines() if line.strip()]
         final = [record for record in metrics if record['epoch'] == epochs - 1]

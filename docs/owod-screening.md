@@ -13,20 +13,20 @@ manifest，保持原类别顺序与阶段标签可见性。筛选数据不构成
 
 | 阶段 | 默认训练图像 | Epochs |
 | --- | --- | --- |
-| Task 1 increment | 2,000 | 8 |
-| Task 2 increment | 2,000 | 8 |
-| Task 2 finetune | 完整作者均衡清单（S 为 1,679 张） | 4 |
+| Task 1 increment | 8,000 | 12 |
+| Task 2 increment | 8,000 | 12 |
+| Task 2 finetune | 完整作者均衡清单（S 为 1,679 张） | 6 |
 
 三组分别为 hard/frozen、soft/frozen、soft/bbox-last。保留模型规模、DINO
-预训练、增强、优化器和学习率；8/4 epochs 是项目诊断预算，非论文 recipe。
-每 4 轮及最后一轮评估。每组单独训练 Task 1，避免改写检查点配置或放宽
+预训练、增强、优化器和学习率；12/6 epochs 是项目诊断预算，非论文 recipe。
+每 2 轮及最后一轮评估。每组单独训练 Task 1，避免改写检查点配置或放宽
 方法链验证；三个 Task 1 本身不是路由效果对照。
 
 ## 数据隔离与选择标准
 
 通过 `tools/owod/manage_data.py prepare-screen` 派生独立诊断数据。
 从前两个任务的官方 **训练** 标注合并已发布的已知类记录，在类别覆盖约束下
-按 `SHA256(seed:source_id)` 固定排序选择 400 张留出图。未来类别、正式测试集
+按 `SHA256(seed:source_id)` 固定排序选择 1,000 张留出图。未来类别、正式测试集
 标签不参与选择。留出图优先排除 Task 2 的完整均衡微调清单，随后从所有增量
 训练、GNN 校准、梯度探测和原型初始化来源中排除；因此作者均衡清单保持完整。
 原始对象身份保留、重复对象记录合并，训练标签始终按阶段过滤。
@@ -58,31 +58,36 @@ workers=4、activation checkpointing。默认路径：
 
 - 父 manifest：`data/owod/s-owodb/split_manifest.json`
 - 权重：`pretrained/dino_resnet50.pth`
-- 输出：`output/screening-s-seed42/`
+- 输出：`output/screening-s-8k/`
 
 不加 `--execute` 只打印流程，不准备数据、不启动训练。
-`--screen-only` 可以仅筛选；默认三组全部完成后自动以优胜方法从 DINO
-重新开始正式全量四任务训练（50 increment / 20 finetune epochs），
-输出到 `full/<winner>/`，绝不从小数据检查点继续。
+默认仅筛选（也可显式传入 `--screen-only`），三组完成后写入 `selection.json`
+并停止。先检查差距和每组后期评估趋势，差距小或排名反复时考虑给前两名增加种子验证。
+当前默认值取代此前的 2,000 张、8/4 轮、12 小时方案；使用新的 `screening-s-8k`
+输出目录，不能将旧小数据检查点接入新配置。
 
-筛选默认有 **12 小时运行上限**，包含数据准备和 GNN 校准，不承诺 12 小时
+明确决定启动全量后，可运行 `python tools/owod/run_screening.py --execute --resume --launch-full`。
+该选项显式启用从 DINO 重新开始的正式全量四任务训练
+（50 increment / 20 finetune epochs），输出到 `full/<winner>/`，绝不从小数据检查点继续。
+
+筛选默认有 **24 小时运行上限**，包含数据准备和 GNN 校准，不承诺 24 小时
 必定完成。超时终止该流程自己的进程组，保留已有检查点；任何失败、不完整
 结果或三组 Known AP50 均为零都不启动全量训练。全量训练不受该上限限制。
 
 ```bash
 # 查看某组的实时输出
-tail -f output/screening-s-seed42/hard.log
+tail -f output/screening-s-8k/hard.log
 
-# 超时/中断后，保持数据和训练配置不变，追加至多 4 小时的运行窗口
-python tools/owod/run_screening.py --execute --resume --budget-hours 4
+# 超时/中断后，保持数据和训练配置不变，追加至多 24 小时的运行窗口
+python tools/owod/run_screening.py --execute --resume --budget-hours 24
 
 # 新一轮预算或数据量必须用新的输出目录；例如增加训练轮数
 python tools/owod/run_screening.py --execute --output output/screening-s-longer \
-  --increment-epochs 12 --finetune-epochs 6 --budget-hours 16
+  --increment-epochs 16 --finetune-epochs 8 --budget-hours 36
 ```
 
 恢复窗口是本次调用的时间上限；更改数据量、seed、epochs、batch 或 GPU 配置
-不能复用原输出目录。若全量阶段中断，同一 `--resume` 命令验证筛选结果后恢复
+不能复用原输出目录。若全量阶段中断，`--resume --launch-full` 验证筛选结果后恢复
 独立全量链。已完成训练阶段会跳过；GNN 校准沿用原有内容寻址缓存验证机制。
 
 单独准备/核验诊断数据：
@@ -90,11 +95,15 @@ python tools/owod/run_screening.py --execute --output output/screening-s-longer 
 ```bash
 python tools/owod/manage_data.py prepare-screen \
   --manifest data/owod/s-owodb/split_manifest.json \
-  --screen-output output/screening-s-seed42/data --train-images 2000 --val-images 400 --seed 42
+  --screen-output output/screening-s-8k/data --train-images 8000 --val-images 1000 --seed 42
 python tools/owod/manage_data.py verify-screen \
   --manifest data/owod/s-owodb/split_manifest.json \
-  --screen-output output/screening-s-seed42/data
+  --screen-output output/screening-s-8k/data
 ```
 
 独立准备数据时，请为后续完整自动流程指定另一个空输出目录；自动流程自己
 管理 `screen_plan.json` 和数据准备，拒绝覆盖不明来源的非空目录。
+
+2026-10-16 补充：首次三组独立 Task 1 的起点存在差异，后续改用
+[共享 Task 1 的 Task 2 对照](owod-task2-comparison.md)，复用原筛选数据，
+只重跑 Task 2 增量与微调，不自动启动全量实验。
