@@ -61,6 +61,25 @@ def test_only_shared_task1_transition_can_change_strategy(parent):
         validate_checkpoint(args, parent.payload)
 
 
+def test_no_distill_only_changes_at_shared_parent_transition(parent):
+    parent.current.screen_no_distill = True
+    validate_checkpoint(parent.current, parent.payload)
+    payload = copy.deepcopy(parent.payload)
+    payload['args'] = copy.deepcopy(parent.current)
+    payload['args'].screen_no_distill = False
+    with pytest.raises(ValueError, match='screen_no_distill'):
+        validate_checkpoint(parent.current, payload, resume=True)
+    parent.current.owod_phase = 'finetune'
+    with pytest.raises(ValueError, match='screen_no_distill'):
+        validate_checkpoint(parent.current, payload)
+
+
+def test_no_distill_rejected_outside_diagnostic():
+    from tools.owod.strict_setting import configure_run
+    with pytest.raises(ValueError, match='screen-no-distill'):
+        configure_run(SimpleNamespace(screen_no_distill=True, owod_screening=''))
+
+
 def test_full_data_and_wrong_parent_cannot_use_branch_exception(parent, tmp_path):
     args = copy.deepcopy(parent.current)
     args.owod_screening_sha256 = None
@@ -109,6 +128,12 @@ def test_task2_plan_has_no_task1_or_calibration(parent, monkeypatch, tmp_path):
     assert second[second.index('--pretrained') + 1] == str(Path(plan['runs'][0]['output_dir']) / 'checkpoint.pth')
     assert all(c[c.index('--graph-gnn-checkpoint') + 1] == str(parent.gnn) for c in (first,second))
     assert plan['shared_task1']['checkpoint_sha256'] == file_sha256(parent.checkpoint)
+    args.screen_no_distill = True
+    for run in run_benchmark.build_plan(args)['runs']:
+        assert '--screen-no-distill' in run['command']
+        assert '--old-class-distillation' not in run['command']
+        assert '--discovery-no-keep' not in run['command']
+    args.screen_no_distill = False
     args.owod_screening = None
     with pytest.raises(ValueError, match='require screening'):
         run_benchmark.build_plan(args)

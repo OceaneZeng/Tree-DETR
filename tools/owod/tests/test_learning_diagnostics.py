@@ -86,6 +86,12 @@ def test_diagnostic_rejects_full_or_unfinished_checkpoints(tmp_path):
         epochs=12, graph_routing='hard', graph_localization='frozen')
     torch.save({'args': saved, 'epoch': 11}, path)
     assert checked_checkpoint(path, 'manifest', 'screen', 1).epochs == 12
+    saved.owod_phase = 'finetune'
+    torch.save({'args': saved, 'epoch': 11}, path)
+    assert checked_checkpoint(path, 'manifest', 'screen', 1, 'finetune').owod_phase == 'finetune'
+    with pytest.raises(ValueError, match='provenance'):
+        checked_checkpoint(path, 'manifest', 'screen', 1)
+    saved.owod_phase = 'increment'
     torch.save({'args': saved, 'epoch': 10}, path)
     with pytest.raises(ValueError, match='completed'):
         checked_checkpoint(path, 'manifest', 'screen', 1)

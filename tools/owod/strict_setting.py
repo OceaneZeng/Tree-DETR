@@ -6,6 +6,10 @@ from tools.owod.protocol import file_sha256, stage_files, RETIRED_MESSAGE
 
 
 def configure_run(args):
+    if getattr(args, 'screen_no_distill', False) and not (
+            getattr(args, 'owod_screening', '') and getattr(args, 'screen_branch_checkpoint', '')
+            and args.owod_stage == 1 and getattr(args, 'owod_discovery', False)):
+        raise ValueError('screen-no-distill requires shared-parent discovery screening Task 2')
     if getattr(args, 'owod_discovery', False):
         from models.graph_local.discovery import DISCOVERY_VERSION
         args.discovery_version = DISCOVERY_VERSION
@@ -96,6 +100,9 @@ def configure_run(args):
                 raise ValueError('Discovery preservation requires its preceding --pretrained checkpoint, also on resume')
             args.old_class_distillation = True
             args.distill_old_class_ids = list(previous)
+        if getattr(args, 'screen_no_distill', False):
+            args.old_class_distillation = False
+            args.distill_old_class_ids = []
     if getattr(args, 'graph_routed_adapter', False):
         if (args.with_tree or args.paper_baseline or args.neighbor_scoped_lora
                 or args.reset_classifier or args.frozen_weights or args.masks
@@ -125,6 +132,8 @@ def validate_checkpoint(args, checkpoint, resume=False):
                           or not getattr(args, 'graph_routed_adapter', False)):
         raise ValueError('Shared-parent branching is restricted to screening Task 2')
     if not branching:
+        if bool(getattr(saved, 'screen_no_distill', False)) != bool(getattr(args, 'screen_no_distill', False)):
+            raise ValueError('Checkpoint cannot change screen_no_distill within Task 2')
         for field in ('screen_branch_checkpoint_sha256', 'screen_branch_gnn_sha256'):
             if getattr(saved, field, None) != getattr(args, field, None):
                 raise ValueError(f'Shared-parent checkpoint chain mismatch: {field}')

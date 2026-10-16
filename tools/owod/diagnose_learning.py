@@ -37,17 +37,17 @@ def score_summary(report):
         for key, row in report.items() if isinstance(row, dict) and 'metrics' in row}
 
 
-def checked_checkpoint(path, manifest_hash, screen_hash, stage):
+def checked_checkpoint(path, manifest_hash, screen_hash, stage, phase='increment'):
     import torch
     payload = torch.load(path, map_location='cpu', weights_only=False)
     saved = payload.get('args')
     expected = {'owod_manifest_sha256': manifest_hash, 'owod_screening_sha256': screen_hash,
-                'owod_stage': stage, 'owod_phase': 'increment', 'owod_discovery': True,
+                'owod_stage': stage, 'owod_phase': phase, 'owod_discovery': True,
                 'paper_comparable_protocol': False}
     if any(getattr(saved, key, None) != value for key, value in expected.items()):
         raise ValueError('Diagnostic checkpoint provenance mismatch')
     if payload.get('epoch', -2) != getattr(saved, 'epochs', 0) - 1:
-        raise ValueError('Diagnostic input must be a completed increment checkpoint')
+        raise ValueError('Diagnostic input must be a completed phase checkpoint')
     if stage == 1 and (saved.graph_routing != 'hard' or saved.graph_localization != 'frozen'):
         raise ValueError('Tiny fit requires the hard/frozen Task 2 diagnostic baseline')
     return saved
@@ -277,6 +277,8 @@ def main(argv=None):
     parser.add_argument('--comparison-root', type=Path, default=ROOT / 'output/task2-shared-s-8k')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'data/owod/s-owodb/split_manifest.json')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--score-phase', choices=('increment', 'finetune'), default='increment',
+                        help='Checkpoint phase for scores-task2 only')
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--device', default='cuda', choices=('cuda', 'cpu'))
     parser.add_argument('--images', type=int, default=160)
@@ -286,6 +288,8 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--report-interval', type=int, default=50)
     args = parser.parse_args(argv)
+    if args.score_phase != 'increment' and args.mode != 'scores-task2':
+        parser.error('--score-phase finetune requires scores-task2')
     if min(args.images, args.steps, args.batch_size, args.report_interval) < 1 or args.workers < 0:
         parser.error('Invalid diagnostic budget')
     os.environ.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=args.gpu)
@@ -301,9 +305,9 @@ def main(argv=None):
     saved = checked_checkpoint(parent, identity['manifest_sha256'], identity['screening_sha256'], 0)
     if args.seed != saved.seed:
         raise ValueError('Use the original paired diagnostic seed')
-    checkpoint = args.comparison_root / 'screen/hard' / manifest['protocol'] / f'seed_{args.seed}/stage_1/increment/checkpoint.pth'
+    checkpoint = args.comparison_root / 'screen/hard' / manifest['protocol'] / f'seed_{args.seed}/stage_1/{args.score_phase}/checkpoint.pth'
     if args.mode != 'scores':
-        saved = checked_checkpoint(checkpoint, identity['manifest_sha256'], identity['screening_sha256'], 1)
+        saved = checked_checkpoint(checkpoint, identity['manifest_sha256'], identity['screening_sha256'], 1, args.score_phase)
         if getattr(saved, 'screen_branch_checkpoint_sha256', None) != plan['checkpoint_sha256']:
             raise ValueError('Task 2 checkpoint has a different common parent')
         if getattr(saved, 'screen_branch_gnn_sha256', None) != plan['gnn_sha256']:
@@ -313,7 +317,7 @@ def main(argv=None):
             raise ValueError('Task 2 diagnostic class order differs from the manifest')
     identity.update(parent_sha256=plan['checkpoint_sha256'], mode=args.mode,
                     checkpoint_sha256=file_sha256(parent if args.mode == 'scores' else checkpoint),
-                    paper_comparable=False, checkpoint_exported=False)
+                    paper_comparable=False, checkpoint_exported=False, score_phase=args.score_phase)
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError('Use a new empty diagnostic output directory; no overwrite/resume')
     args.output.mkdir(parents=True, exist_ok=True)
@@ -336,7 +340,7 @@ def main(argv=None):
             'known_only_screening': True, 'diagnostic_previous_only': not task2}
     variants = task2_score_variants(known) if task2 else score_variants(old, known)
     report = evaluate_views(model, loader, dataset.coco, variants, spec, old, current, args.device)
-    report['note'] = ('Task 2 increment checkpoint; known-only diagnostic holdout, not official benchmark results.'
+    report['note'] = (f'Task 2 {args.score_phase} checkpoint; known-only diagnostic holdout, not official benchmark results.'
                       if task2 else 'Previous AP50 only: GT contains Task 1 classes; no current-class performance is claimed.')
     write_json(args.output / 'scores.json', report)
     summary = score_summary(report)

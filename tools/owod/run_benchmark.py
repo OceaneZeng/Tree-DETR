@@ -22,6 +22,9 @@ def build_plan(args):
     screening = getattr(args, 'owod_screening', None)
     shared = getattr(args, 'screen_shared_task1', None)
     shared_gnn = getattr(args, 'screen_shared_gnn', None)
+    no_distill = getattr(args, 'screen_no_distill', False)
+    if no_distill and not (screening and shared and shared_gnn and args.method == 'discovery'):
+        raise ValueError('screen-no-distill requires shared-parent discovery screening')
     if bool(shared) != bool(shared_gnn) or (shared and not screening):
         raise ValueError('Shared Task 1/GNN inputs require screening and both artifact paths')
     if args.recipe == 'ore-paper':
@@ -128,13 +131,15 @@ def build_plan(args):
                             '--graph-sketch-max-images', str(args.graph_sketch_max_images)]
                 if gnn_checkpoint:
                     command += ['--graph-gnn-checkpoint', str(gnn_checkpoint)]
-                if stage > 0:
+                if stage > 0 and not no_distill:
                     # Hold preservation constant across discovery and its adapter baseline.
                     record = manifest['stages'][stage]
                     old = [c for c in manifest['category_order_source_ids']
                            if c in set(record['active_classes']) - set(record['classes'])]
                     command += ['--old-class-distillation', '--distill-old-class-ids', *map(str, old)]
             if method.startswith('discovery'):
+                if no_distill:
+                    command += ['--screen-no-distill']
                 command += ['--owod-discovery', '--discovery-scoring', getattr(args, 'discovery_scoring', 'hierarchical')]
                 if method == 'discovery-scratch':
                     command += ['--discovery-no-transfer']
@@ -165,6 +170,7 @@ def main(argv=None):
     parser.add_argument('--owod-screening', type=Path)
     parser.add_argument('--screen-shared-task1', type=Path)
     parser.add_argument('--screen-shared-gnn', type=Path)
+    parser.add_argument('--screen-no-distill', action='store_true')
     parser.add_argument('--screen-increment-epochs', type=int, default=8)
     parser.add_argument('--screen-finetune-epochs', type=int, default=4)
     parser.add_argument('--screen-eval-interval', type=int, default=4)

@@ -100,6 +100,8 @@ def get_args_parser():
                         help='Verified training-only diagnostic selection; not an official benchmark run')
     parser.add_argument('--screen-branch-checkpoint', default='',
                         help='Pinned common Task 1 parent for a diagnostic Task 2 comparison only')
+    parser.add_argument('--screen-no-distill', action='store_true',
+                        help='Disable only old-class output distillation in a shared-parent Task 2 diagnostic')
     parser.add_argument('--owod-stage', default=None, type=int,
                         help='Stage index in --owod-manifest, recorded in run metadata')
     parser.add_argument('--owod-phase', choices=('increment', 'finetune'), default='increment')
