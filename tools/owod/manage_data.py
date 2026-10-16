@@ -188,6 +188,31 @@ def prepare_dataset(protocol, source, directory, decode_images=False):
     return report
 
 
+def prepare_fit_data(manifest_path, screening_path, output, images=160, seed=42):
+    """Prepare disposable training-only overfit data; never register a new protocol."""
+    from tools.owod.screening_data import screening_files, select_images, subset, write_json
+    manifest, files = screening_files(Path(manifest_path), Path(screening_path), 1)
+    screen = read_json(Path(screening_path))
+    if seed != screen['seed']:
+        raise ValueError('Tiny-fit seed must match the parent screening data')
+    source = read_json(files['increment_train'])
+    classes = manifest['stages'][1]['classes']
+    names = select_images(source, images, classes, seed)
+    output = Path(output)
+    if output.exists() and any(output.iterdir()):
+        raise ValueError('Use a new empty tiny-fit data directory')
+    path = output / 'train.json'
+    write_json(path, subset(source, names, classes))
+    write_json(output / 'diagnostic_data.json', {
+        'kind': 'tiny_fit_train_only', 'paper_comparable': False,
+        'parent_manifest_sha256': file_sha256(Path(manifest_path)),
+        'screening_sha256': file_sha256(Path(screening_path)),
+        'source_annotation_sha256': file_sha256(files['increment_train']),
+        'annotation_sha256': file_sha256(path), 'seed': seed, 'images': images,
+        'source_ids': sorted(names), 'evaluation': 'training fit only; not generalization'})
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('plan', 'check', 'prepare', 'verify', 'prepare-screen', 'verify-screen'))
