@@ -2,7 +2,39 @@
 
 只读使用已有诊断检查点；不修改正式训练代码、原始数据、旧输出或 checkpoint。
 所有新增训练是一次性诊断，不导出权重，不允许续入正式实验。后续只保留
-hard/frozen 与 soft/frozen，soft-localization 的历史结果留存，不再扩展训练。
+hard/frozen 作为排障基线；soft/frozen 暂停扩展，soft-localization 的历史结果留存。
+
+## 当前下一步：Task 2 四种评分配置，只评估
+
+完成已有 scores、fit 和 distill 后，运行本节即可，不需要重跑它们。
+本地提交并推送代码，服务器 `git pull` 后，在已激活环境的 tmux 中运行：
+
+```bash
+mkdir -p output/learning-diagnostics/logs
+set -o pipefail
+python -u tools/owod/diagnose_learning.py scores-task2 --gpu 0 \
+  --batch-size 2 --workers 4 \
+  --output output/learning-diagnostics/scores-task2 \
+  2>&1 | tee output/learning-diagnostics/logs/scores-task2.log
+```
+
+使用共享起点对照中 hard 的 Task 2 **increment 结束**权重和原 1,000 张留出图，
+不使用 finetune 权重或没有导出的短拟合权重。核验相同 manifest、screening、
+共同 Task 1/GNN 来源和阶段，四种设置共享同一模型前向输出：
+hierarchical/focal × top-50/top-300，类别范围均为 Task 2 的全部已知类。
+
+输出目录中的 `scores.json` 保留原始比例单位 AP 和候选计数；`summary.json`
+给出百分数单位 Previous/Current/Known AP50 和 old/current/unknown 候选占比；
+`complete.json` 表示全部评估完成。留出图仅有已知类监督，不能由 unknown
+候选占比推断未知类检测质量，也不报告官方未知指标。这里不修改正式评分默认值。
+
+优先与同一起点的 fit/heldout_before 对照 hierarchical_top50，再比较其余设置。
+如果候选放宽后新类仍很差，就不能把主要问题归因于 Top-K 截断。
+该结果仅用于确定一个修正方案，随后最多做一轮 Task 2 增量→微调验证；
+不自动选出最高分配置或启动全量训练。全量配置需要同时考虑旧类保持与新类学习，
+并明确记录评分规则和候选数量；诊断检查点不能初始化正式实验。
+
+输出目录必须为空；若中断，使用新的目录名，并相应更换日志名。
 
 用户通过 Git 同步本地改动后，在服务器仓库中激活 tree-detr 环境，建议在 tmux
 运行以下命令。默认使用 PCI 顺序 GPU 0，一张 3090 即可；与此前两卡筛选的

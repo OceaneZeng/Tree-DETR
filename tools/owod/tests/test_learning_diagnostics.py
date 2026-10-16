@@ -49,6 +49,36 @@ def test_gradient_monitor_distinguishes_old_and_new_rows():
     assert after['old_classifier']['delta_l2_squared'] == 0
 
 
+def test_task2_scores_share_forward_and_report_both_class_groups():
+    from tools.owod.diagnose_learning import task2_score_variants, score_summary
+    class Model(nn.Module):
+        calls = 0
+        def forward(self, samples):
+            self.calls += 1
+            return {'pred_logits': torch.zeros(1, 100, 4),
+                    'pred_boxes': torch.tensor([.5, .5, .2, .2]).repeat(1, 100, 1),
+                    'pred_objectness': torch.full((1, 100), 5.),
+                    'pred_novelty': torch.full((1, 100), -5.)}
+    model = Model()
+    target = {'image_id': torch.tensor([1]), 'orig_size': torch.tensor([100, 100]),
+              'labels': torch.tensor([1, 2]), 'boxes': torch.tensor([[.5, .5, .2, .2]] * 2)}
+    coco = SimpleNamespace(imgs={1: {'owod_source_id': 'one'}}, imgToAnns={1: [
+        {'category_id': c, 'voc_bbox': [41, 41, 60, 60]} for c in (1, 2)]})
+    spec = {'image_source_ids': ['one'], 'ap_mode': 'integral', 'iou_threshold': .5,
+            'wi_recall': .8, 'known_only_screening': True}
+    result = evaluate_views(model, [(torch.zeros(1), [target])], coco,
+                            task2_score_variants([1, 2]), spec, [1], [2], 'cpu')
+    assert model.calls == 1
+    summary = score_summary(result)
+    assert set(summary) == {'hierarchical_top50', 'hierarchical_top300', 'focal_top50', 'focal_top300'}
+    for name, row in summary.items():
+        assert set(row['ap50_percent']) == {'previous_ap50', 'current_ap50', 'known_ap50'}
+        assert row['ap50_percent']['current_ap50'] == 100 * result[name]['metrics']['current_ap50']
+        assert sum(row['candidate_percent'].values()) == pytest.approx(100)
+        assert result[name]['composition']['detections'] == int(name.split('top')[1])
+    assert result['raw_current_box_recall_iou50']['recall'] == 1
+
+
 def test_diagnostic_rejects_full_or_unfinished_checkpoints(tmp_path):
     path = tmp_path / 'checkpoint.pth'
     saved = SimpleNamespace(owod_manifest_sha256='manifest', owod_screening_sha256='screen',

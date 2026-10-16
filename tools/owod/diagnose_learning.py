@@ -21,6 +21,22 @@ def score_variants(old, known):
             'expanded_hierarchical_top300': (known, 'hierarchical', 300)}
 
 
+def task2_score_variants(known):
+    return {f'{scoring}_top{limit}': (known, scoring, limit)
+            for scoring in ('hierarchical', 'focal') for limit in (50, 300)}
+
+
+def score_summary(report):
+    """Display AP in percent; retain the original fractional metrics in scores.json."""
+    return {key: {
+        'ap50_percent': {name: 100 * value for name, value in row['metrics'].items()
+                         if name.endswith('ap50') and value is not None},
+        'candidate_percent': {group: 100 * row['composition'][group] /
+                              max(1, row['composition']['detections'])
+                              for group in ('old', 'current', 'unknown')}}
+        for key, row in report.items() if isinstance(row, dict) and 'metrics' in row}
+
+
 def checked_checkpoint(path, manifest_hash, screen_hash, stage):
     import torch
     payload = torch.load(path, map_location='cpu', weights_only=False)
@@ -256,7 +272,7 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('scores', 'fit', 'distill'))
+    parser.add_argument('mode', choices=('scores', 'scores-task2', 'fit', 'distill'))
     parser.add_argument('--source-root', type=Path, default=ROOT / 'output/screening-s-8k')
     parser.add_argument('--comparison-root', type=Path, default=ROOT / 'output/task2-shared-s-8k')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'data/owod/s-owodb/split_manifest.json')
@@ -304,22 +320,29 @@ def main(argv=None):
     write_json(args.output / 'diagnostic_config.json', {**identity, 'arguments': vars(args) | {'manifest': str(args.manifest),
                'source_root': str(args.source_root), 'comparison_root': str(args.comparison_root),
                'screening': str(args.screening), 'output': str(args.output)}})
-    if args.mode != 'scores':
+    if args.mode in ('fit', 'distill'):
         fit(args, saved, checkpoint, parent, manifest, files, identity)
         return 0
     import torch
     from tools.owod.gnn_calibration import load_detector
-    model, _ = load_detector(saved, parent, torch.device(args.device))
-    _, old_files = screening_files(args.manifest, args.screening, 0)
-    dataset, loader = make_loader(manifest['image_root'], old_files['full_val'], args.batch_size, args.workers)
+    task2 = args.mode == 'scores-task2'
+    model, _ = load_detector(saved, checkpoint if task2 else parent, torch.device(args.device))
+    if not task2:
+        _, files = screening_files(args.manifest, args.screening, 0)
+    dataset, loader = make_loader(manifest['image_root'], files['full_val'], args.batch_size, args.workers)
     old, known = manifest['stages'][0]['active_classes'], manifest['stages'][1]['active_classes']
     current = manifest['stages'][1]['classes']
     spec = {**manifest['evaluation'], 'image_source_ids': read_json(args.screening)['heldout_source_ids'],
-            'known_only_screening': True, 'diagnostic_previous_only': True}
-    report = evaluate_views(model, loader, dataset.coco, score_variants(old, known), spec, old, current, args.device)
-    report['note'] = 'Previous AP50 only: GT contains Task 1 classes; no current-class performance is claimed.'
+            'known_only_screening': True, 'diagnostic_previous_only': not task2}
+    variants = task2_score_variants(known) if task2 else score_variants(old, known)
+    report = evaluate_views(model, loader, dataset.coco, variants, spec, old, current, args.device)
+    report['note'] = ('Task 2 increment checkpoint; known-only diagnostic holdout, not official benchmark results.'
+                      if task2 else 'Previous AP50 only: GT contains Task 1 classes; no current-class performance is claimed.')
     write_json(args.output / 'scores.json', report)
-    print(json.dumps(report, indent=2))
+    summary = score_summary(report)
+    write_json(args.output / 'summary.json', summary)
+    write_json(args.output / 'complete.json', {'kind': 'score_diagnostic', **identity})
+    print(json.dumps(summary, indent=2), flush=True)
     return 0
 
 
