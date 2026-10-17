@@ -272,13 +272,13 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('scores', 'scores-task2', 'fit', 'distill'))
+    parser.add_argument('mode', choices=('scores', 'scores-task2', 'supervision', 'fit', 'distill'))
     parser.add_argument('--source-root', type=Path, default=ROOT / 'output/screening-s-8k')
     parser.add_argument('--comparison-root', type=Path, default=ROOT / 'output/task2-shared-s-8k')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'data/owod/s-owodb/split_manifest.json')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--score-phase', choices=('increment', 'finetune'), default='increment',
-                        help='Checkpoint phase for scores-task2 only')
+                        help='Checkpoint phase for scores-task2 or supervision')
     parser.add_argument('--gpu', default='0')
     parser.add_argument('--device', default='cuda', choices=('cuda', 'cpu'))
     parser.add_argument('--images', type=int, default=160)
@@ -288,8 +288,8 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--report-interval', type=int, default=50)
     args = parser.parse_args(argv)
-    if args.score_phase != 'increment' and args.mode != 'scores-task2':
-        parser.error('--score-phase finetune requires scores-task2')
+    if args.score_phase != 'increment' and args.mode not in ('scores-task2', 'supervision'):
+        parser.error('--score-phase finetune requires scores-task2 or supervision')
     if min(args.images, args.steps, args.batch_size, args.report_interval) < 1 or args.workers < 0:
         parser.error('Invalid diagnostic budget')
     os.environ.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=args.gpu)
@@ -326,6 +326,10 @@ def main(argv=None):
                'screening': str(args.screening), 'output': str(args.output)}})
     if args.mode in ('fit', 'distill'):
         fit(args, saved, checkpoint, parent, manifest, files, identity)
+        return 0
+    if args.mode == 'supervision':
+        from tools.owod.supervision_probe import run_probe
+        run_probe(args, saved, checkpoint, manifest, identity)
         return 0
     import torch
     from tools.owod.gnn_calibration import load_detector
