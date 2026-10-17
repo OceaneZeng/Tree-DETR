@@ -130,7 +130,10 @@ def parameter_views(model, old, current):
             yield 'new_classifier', name, parameter, current
             yield 'old_classifier', name, parameter, old
         elif parameter.requires_grad:
-            group = 'class_adapters' if 'graph_adapter' in name else 'discovery_and_other'
+            from tools.owod.capacity_probe import parameter_group
+            group = parameter_group(name)
+            if group not in ('class_adapters', 'bbox_heads', 'base_decoder'):
+                group = 'discovery_and_other'
             yield group, name, parameter, None
 
 
@@ -172,12 +175,18 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                      'image_source_ids': [image['owod_source_id'] for image in dataset.coco.dataset['images']]}
     val_spec = {**specification, 'diagnostic_current_only': False,
                 'image_source_ids': read_json(args.screening)['heldout_source_ids']}
-    variants = {'hierarchical': (known, 'hierarchical', 50)}
-    for treatment in (['distill_on', 'distill_off'] if args.mode == 'distill' else ['distill_on']):
+    capacity = args.mode == 'capacity'
+    variants = task2_score_variants(known) if capacity else {'hierarchical': (known, 'hierarchical', 50)}
+    treatments = (['frozen', 'decoder_bbox_open'] if capacity else
+                  ['distill_on', 'distill_off'] if args.mode == 'distill' else ['distill_on'])
+    for treatment in treatments:
         set_seed(args.seed)
         model, criterion = load_detector(source_args, checkpoint, torch.device(args.device))
         handles = configure_trainable(model, current, known, localization='frozen')
         model.train_discovery()
+        if treatment == 'decoder_bbox_open':
+            from tools.owod.capacity_probe import open_detection_parameters
+            open_detection_parameters(model)
         criterion.weight_dict['loss_adapter_route'] = source_args.graph_route_loss_coef
         criterion.epoch = source_args.epochs
         ema = make_ema(model)
@@ -202,6 +211,14 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
         initial = parameter_snapshot(model, old, current)
         directory = args.output / treatment
         directory.mkdir()
+        if capacity:
+            from tools.owod.capacity_probe import gradient_paths, probe_training
+            write_json(directory / 'parameter_scope.json', {
+                'trainable': {n: p.numel() for n, p in model.named_parameters() if p.requires_grad},
+                'classifier_rows': current, 'old_classifier_rows_frozen': old,
+                'dropout_disabled': True, 'old_output_distillation': False,
+                'learning_rate': source_args.lr, 'constant_lr_fresh_adamw': True})
+            write_json(directory / 'probe_before.json', probe_training(model, criterion, eval_loader, known, args.device))
         write_json(directory / 'before.json', evaluate_views(model, eval_loader, dataset.coco, variants,
                                                             specification, old, current, args.device))
         write_json(directory / 'heldout_before.json', evaluate_views(model, val_loader, val_dataset.coco, variants,
@@ -217,7 +234,9 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                 iterator = iter(loader)
                 samples, targets = next(iterator)
             samples, targets = samples.to(args.device), move_targets(targets, torch.device(args.device))
-            model.train(); criterion.train()
+            # Eval mode disables dropout but does not disable autograd. Both arms
+            # retain identical loss/EMA/memory rules, only trainable scope differs.
+            model.train(not capacity); criterion.train()
             optimizer.zero_grad(set_to_none=True)
             outputs = model(samples)
             with torch.no_grad():
@@ -235,6 +254,8 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
             total = sum(losses[key] * weight for key, weight in weights.items() if key in losses)
             if not torch.isfinite(total):
                 raise RuntimeError(f'Nonfinite diagnostic loss at step {step}')
+            if capacity and step == 1:
+                write_json(directory / 'gradient_paths.json', gradient_paths(model, losses, weights))
             total.backward()
             mask_inactive_adapter_gradients(model)
             monitor = step == 1 or step % args.report_interval == 0 or step == args.steps
@@ -261,6 +282,8 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                                                            specification, old, current, args.device))
         write_json(directory / 'heldout_after.json', evaluate_views(model, val_loader, val_dataset.coco, variants,
                                                                    val_spec, old, current, args.device))
+        if capacity:
+            write_json(directory / 'probe_after.json', probe_training(model, criterion, eval_loader, known, args.device))
         for handle in handles:
             handle.remove()
         del model, criterion, teacher, ema, optimizer
@@ -272,7 +295,7 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('scores', 'scores-task2', 'supervision', 'fit', 'distill'))
+    parser.add_argument('mode', choices=('scores', 'scores-task2', 'supervision', 'capacity', 'fit', 'distill'))
     parser.add_argument('--source-root', type=Path, default=ROOT / 'output/screening-s-8k')
     parser.add_argument('--comparison-root', type=Path, default=ROOT / 'output/task2-shared-s-8k')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'data/owod/s-owodb/split_manifest.json')
@@ -283,15 +306,20 @@ def main(argv=None):
     parser.add_argument('--device', default='cuda', choices=('cuda', 'cpu'))
     parser.add_argument('--images', type=int, default=160)
     parser.add_argument('--steps', type=int, default=600)
+    parser.add_argument('--capacity-lr', type=float, default=2e-4,
+                        help='Constant diagnostic LR for both capacity arms; not a paper schedule')
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--report-interval', type=int, default=50)
     args = parser.parse_args(argv)
-    if args.score_phase != 'increment' and args.mode not in ('scores-task2', 'supervision'):
-        parser.error('--score-phase finetune requires scores-task2 or supervision')
+    if args.score_phase != 'increment' and args.mode not in ('scores-task2', 'supervision', 'capacity'):
+        parser.error('--score-phase finetune requires scores-task2, supervision or capacity')
     if min(args.images, args.steps, args.batch_size, args.report_interval) < 1 or args.workers < 0:
         parser.error('Invalid diagnostic budget')
+    import math
+    if not math.isfinite(args.capacity_lr) or args.capacity_lr <= 0:
+        parser.error('capacity-lr must be positive and finite')
     os.environ.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=args.gpu)
     args.screening = args.source_root / 'data/screening.json'
     manifest, files = screening_files(args.manifest, args.screening, 1)
@@ -324,7 +352,11 @@ def main(argv=None):
     write_json(args.output / 'diagnostic_config.json', {**identity, 'arguments': vars(args) | {'manifest': str(args.manifest),
                'source_root': str(args.source_root), 'comparison_root': str(args.comparison_root),
                'screening': str(args.screening), 'output': str(args.output)}})
-    if args.mode in ('fit', 'distill'):
+    if args.mode in ('fit', 'distill', 'capacity'):
+        if args.mode == 'capacity':
+            import copy
+            saved = copy.deepcopy(saved)
+            saved.lr = args.capacity_lr
         fit(args, saved, checkpoint, parent, manifest, files, identity)
         return 0
     if args.mode == 'supervision':

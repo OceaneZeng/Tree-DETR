@@ -101,7 +101,8 @@ def test_diagnostic_rejects_full_or_unfinished_checkpoints(tmp_path):
         checked_checkpoint(path, 'manifest', 'screen', 1)
 
 
-def test_paired_fit_exports_metrics_not_weights(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['distill', 'capacity'])
+def test_paired_fit_exports_metrics_not_weights(tmp_path, monkeypatch, mode):
     import copy
     import json
     from tools.owod import diagnose_learning as diag
@@ -134,24 +135,30 @@ def test_paired_fit_exports_metrics_not_weights(tmp_path, monkeypatch):
     batch = (nested_tensor_from_tensor_list([torch.zeros(3, 4, 4)]), [{'labels': torch.tensor([2])}])
     monkeypatch.setattr(diag, 'make_loader', lambda *a, **k: (dataset, [batch]))
     monkeypatch.setattr(diag, 'evaluate_views', lambda model, *a: {'weight': float(model.class_embed.weight.sum())})
+    monkeypatch.setattr('tools.owod.capacity_probe.open_detection_parameters', lambda model: None)
+    monkeypatch.setattr('tools.owod.capacity_probe.probe_training', lambda *a: {'gt_count': 1})
     screen = tmp_path / 'screen.json'
     screen.write_text(json.dumps({'heldout_source_ids': ['one']}))
     saved = SimpleNamespace(owod_previous_class_ids=[1], owod_current_class_ids=[2], owod_known_class_ids=[1, 2],
         graph_route_loss_coef=1., epochs=12, lr=.01, weight_decay=.0001, class_embed_lr_mult=1.,
         lr_backbone_names=['backbone'], lr_backbone=.001, lr_linear_proj_names=[], lr_linear_proj_mult=.1,
         distill_score_threshold=.3, distill_max_queries=20, distill_class_coef=2., distill_bbox_coef=5., clip_max_norm=.1)
-    args = SimpleNamespace(mode='distill', manifest=tmp_path / 'manifest', screening=screen, output=tmp_path / 'result',
+    args = SimpleNamespace(mode=mode, manifest=tmp_path / 'manifest', screening=screen, output=tmp_path / 'result',
         images=1, seed=42, steps=2, batch_size=1, workers=0, device='cpu', report_interval=1)
     args.output.mkdir()
     diag.fit(args, saved, tmp_path / 'checkpoint', tmp_path / 'parent',
              {'image_root': str(tmp_path), 'evaluation': {}}, {'full_val': tmp_path / 'val'}, {})
-    for treatment in ('distill_on', 'distill_off'):
+    treatments = ('frozen', 'decoder_bbox_open') if mode == 'capacity' else ('distill_on', 'distill_off')
+    for treatment in treatments:
         assert (args.output / treatment / 'after.json').is_file()
         records = [json.loads(line) for line in (args.output / treatment / 'updates.jsonl').read_text().splitlines()]
         assert records[-1]['parameters']['new_classifier']['delta_l2_squared'] > 0
         assert ('loss_distill_cls' in records[-1]['weighted_losses']) == (treatment == 'distill_on')
+        if mode == 'capacity':
+            assert (args.output / treatment / 'gradient_paths.json').is_file()
+            assert (args.output / treatment / 'probe_after.json').is_file()
     assert not list(args.output.rglob('*.pth'))
-    assert (args.output / 'distill_on/before.json').read_bytes() == (args.output / 'distill_off/before.json').read_bytes()
+    assert (args.output / treatments[0] / 'before.json').read_bytes() == (args.output / treatments[1] / 'before.json').read_bytes()
 
 
 def test_fit_data_keeps_new_labels_and_excludes_holdout(source, tmp_path):
