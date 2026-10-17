@@ -1,1 +1,2 @@
 configs/owod/*/ImageSets/*.txt -text
+tools/owod/*.sh text eol=lf

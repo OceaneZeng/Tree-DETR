@@ -148,6 +148,18 @@ class StrictSettingTests(unittest.TestCase):
                                    backbone_weights=weights, output_dir=root / 'output', seed=42,
                                    nproc_per_node=2, batch_size=2, num_workers=0)
             plan = build_plan(args)
+            args.task1_only = True
+            task1 = build_plan(args)
+            self.assertEqual(len(task1['runs']), 1)
+            self.assertEqual(task1['runs'][0]['stage'], 0)
+            self.assertEqual(task1['runs'][0]['epochs'], 50)
+            for flag in ('--pretrained', '--resume', '--owod-discovery', '--graph-routed-adapter', '--owod-screening'):
+                self.assertNotIn(flag, task1['runs'][0]['command'])
+            args.owod_screening = root / 'screen.json'
+            with self.assertRaisesRegex(ValueError, 'task1-only'):
+                build_plan(args)
+            args.owod_screening = None
+            args.task1_only = False
             self.assertEqual([r['phase'] for r in plan['runs']],
                              ['increment', 'increment', 'finetune', 'increment', 'finetune', 'increment', 'finetune'])
             self.assertEqual([r['epochs'] for r in plan['runs']], [50, 50, 20, 50, 20, 50, 20])

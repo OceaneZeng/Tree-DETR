@@ -129,14 +129,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             print(loss_dict_reduced)
+            print('Nonfinite loss context:', {'epoch': epoch,
+                  'image_ids': [t['image_id'].detach().cpu().tolist() for t in targets]}, flush=True)
             sys.exit(1)
 
         losses.backward()
         mask_inactive_adapter_gradients(model)
-        if max_norm > 0:
-            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        else:
-            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        try:
+            if max_norm > 0:
+                grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm, error_if_nonfinite=True)
+            else:
+                grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+                if not torch.isfinite(grad_total_norm):
+                    raise RuntimeError('Nonfinite gradient norm')
+        except RuntimeError:
+            print('Gradient failure context:', {'epoch': epoch,
+                  'image_ids': [t['image_id'].detach().cpu().tolist() for t in targets]}, flush=True)
+            raise
         optimizer.step()
         if discovery_teacher is not None:
             from models.graph_local.discovery import update_ema

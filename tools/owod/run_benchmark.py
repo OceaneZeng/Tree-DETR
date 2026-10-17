@@ -23,6 +23,9 @@ def build_plan(args):
     shared = getattr(args, 'screen_shared_task1', None)
     shared_gnn = getattr(args, 'screen_shared_gnn', None)
     no_distill = getattr(args, 'screen_no_distill', False)
+    task1_only = getattr(args, 'task1_only', False)
+    if task1_only and (screening or shared or shared_gnn):
+        raise ValueError('task1-only is for fresh full-data Task 1, not screening/shared-parent runs')
     if no_distill and not (screening and shared and shared_gnn and args.method == 'discovery'):
         raise ValueError('screen-no-distill requires shared-parent discovery screening')
     if bool(shared) != bool(shared_gnn) or (shared and not screening):
@@ -62,7 +65,7 @@ def build_plan(args):
         shared_identity = validate_inputs(args.manifest, screening, shared, shared_gnn,
                                           args.backbone_weights, args.seed)
     runs, previous = [], shared
-    for stage in (range(1, 2) if shared else range(2 if screening else 4)):
+    for stage in (range(1) if task1_only else range(1, 2) if shared else range(2 if screening else 4)):
         gnn_checkpoint = None
         if shared:
             gnn_checkpoint = shared_gnn
@@ -161,12 +164,16 @@ def build_plan(args):
                       schedule_source='User-authorized diagnostic budget; not paper training schedule')
     if shared_identity:
         result['shared_task1'] = shared_identity
+    if task1_only:
+        result['scope'] = 'full-data Task 1 only; no automatic Task 2 transition'
     return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
+    parser.add_argument('--task1-only', action='store_true',
+                        help='Train only full-data Task 1 and stop before any increment/calibration')
     parser.add_argument('--owod-screening', type=Path)
     parser.add_argument('--screen-shared-task1', type=Path)
     parser.add_argument('--screen-shared-gnn', type=Path)
