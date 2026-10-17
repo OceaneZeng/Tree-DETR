@@ -2,6 +2,28 @@
 import torch
 
 
+@torch.no_grad()
+def isolated_predictions(outputs, reference, processor, old, current, sizes):
+    """Keep source scores/boxes intact, then apply one shared candidate budget.
+
+    Scores use each branch's full known-class denominator. No GT routing,
+    score calibration, per-branch quota, or unknown suppression is applied.
+    """
+    from models.graph_local.discovery import DiscoveryPostProcess
+    limit = (len(processor.known_ids) + 1) * max(outputs['pred_logits'].shape[1], reference['pred_logits'].shape[1])
+    full = DiscoveryPostProcess(known_ids=processor.known_ids, max_detections=limit,
+                               scoring=processor.scoring, unknown_threshold=processor.unknown_threshold)
+    fresh, frozen = full(outputs, sizes), full(reference, sizes)
+    results = []
+    for new, previous in zip(fresh, frozen):
+        new_mask = torch.isin(new['labels'], new['labels'].new_tensor(current))
+        old_mask = torch.isin(previous['labels'], previous['labels'].new_tensor([*old, 91]))
+        merged = {key: torch.cat((previous[key][old_mask], new[key][new_mask])) for key in previous}
+        keep = merged['scores'].topk(min(processor.max_detections, len(merged['scores']))).indices
+        results.append({key: value[keep] for key, value in merged.items()})
+    return results
+
+
 def open_detection_parameters(model):
     """Expose base decoder and complete bbox MLPs; keep existing row/bank masks."""
     detector = model.detr

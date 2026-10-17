@@ -64,7 +64,7 @@ def make_loader(image_root, annotation, batch, workers, shuffle=False, seed=42):
     return dataset, loader
 
 
-def evaluate_views(model, loader, coco, variants, specification, old, current, device):
+def evaluate_views(model, loader, coco, variants, specification, old, current, device, protected_model=None):
     import torch
     from models.graph_local.discovery import DiscoveryPostProcess
     from models.owod_benchmark_eval import evaluate_author_benchmark
@@ -76,9 +76,12 @@ def evaluate_views(model, loader, coco, variants, specification, old, current, d
                        old_score_sum=0., current_score_sum=0.) for key in variants}
     coverage = {group: {'hits': 0, 'gt': 0} for group in ('old', 'current')}
     model.eval()
+    if protected_model is not None:
+        protected_model.eval()
     with torch.no_grad():
         for samples, targets in loader:
             outputs = model(samples.to(device))
+            reference = protected_model(samples.to(device)) if protected_model is not None else None
             sizes = torch.stack([t['orig_size'] for t in targets]).to(device)
             for index, target in enumerate(targets):
                 for group, ids in (('old', old), ('current', current)):
@@ -90,7 +93,12 @@ def evaluate_views(model, loader, coco, variants, specification, old, current, d
                                           box_cxcywh_to_xyxy(boxes))[0]
                         coverage[group]['hits'] += int((overlap.amax(0) > .5).sum())
             for key, processor in processors.items():
-                for target, result in zip(targets, processor(outputs, sizes)):
+                if reference is not None:
+                    from tools.owod.capacity_probe import isolated_predictions
+                    processed = isolated_predictions(outputs, reference, processor, old, current, sizes)
+                else:
+                    processed = processor(outputs, sizes)
+                for target, result in zip(targets, processed):
                     result = {k: v.cpu() for k, v in result.items()}
                     predictions[key][int(target['image_id'])] = result
                     labels = result['labels'].tolist()
@@ -120,6 +128,8 @@ def evaluate_views(model, loader, coco, variants, specification, old, current, d
         report[f'raw_{group}_box_recall_iou50'] = {**values,
             'recall': values['hits'] / values['gt'] if values['gt'] else None,
             'definition': 'class-agnostic all-query geometric coverage; not author U-Recall/AP'}
+    if protected_model is not None:
+        report['coverage_note'] = 'Raw box coverage describes the trained branch only, not the combined predictions.'
     return report
 
 
@@ -175,9 +185,10 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                      'image_source_ids': [image['owod_source_id'] for image in dataset.coco.dataset['images']]}
     val_spec = {**specification, 'diagnostic_current_only': False,
                 'image_source_ids': read_json(args.screening)['heldout_source_ids']}
-    capacity = args.mode == 'capacity'
+    capacity = args.mode in ('capacity', 'isolation')
+    isolation = args.mode == 'isolation'
     variants = task2_score_variants(known) if capacity else {'hierarchical': (known, 'hierarchical', 50)}
-    treatments = (['frozen', 'decoder_bbox_open'] if capacity else
+    treatments = (['decoder_bbox_open'] if isolation else ['frozen', 'decoder_bbox_open'] if capacity else
                   ['distill_on', 'distill_off'] if args.mode == 'distill' else ['distill_on'])
     for treatment in treatments:
         set_seed(args.seed)
@@ -191,6 +202,10 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
         criterion.epoch = source_args.epochs
         ema = make_ema(model)
         teacher = None
+        protected = None
+        if isolation:
+            protected, _ = load_detector(source_args, checkpoint, torch.device(args.device))
+            protected.eval().requires_grad_(False)
         if treatment == 'distill_on':
             teacher, _ = load_detector(source_args, parent, torch.device(args.device))
             teacher.eval().requires_grad_(False)
@@ -223,6 +238,9 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                                                             specification, old, current, args.device))
         write_json(directory / 'heldout_before.json', evaluate_views(model, val_loader, val_dataset.coco, variants,
                                                                     val_spec, old, current, args.device))
+        if isolation:
+            write_json(directory / 'isolated_heldout_before.json', evaluate_views(model, val_loader, val_dataset.coco,
+                variants, val_spec, old, current, args.device, protected_model=protected))
         # Evaluation must not change the minibatch/dropout RNG used by the paired fits.
         set_seed(args.seed)
         _, loader = make_loader(manifest['image_root'], annotation, args.batch_size, args.workers, True, args.seed)
@@ -284,9 +302,18 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
                                                                    val_spec, old, current, args.device))
         if capacity:
             write_json(directory / 'probe_after.json', probe_training(model, criterion, eval_loader, known, args.device))
+        if isolation:
+            write_json(directory / 'isolated_heldout_after.json', evaluate_views(model, val_loader, val_dataset.coco,
+                variants, val_spec, old, current, args.device, protected_model=protected))
+            write_json(directory / 'isolation_scope.json', {
+                'old_and_unknown_source': str(checkpoint), 'current_source': 'disposable trained branch',
+                'shared_global_topk': True, 'per_branch_quota': False,
+                'raw_box_coverage_source': 'trained branch only; not isolated combined coverage',
+                'guarantee': 'Frozen old/unknown scores and boxes before global top-k; AP may change through competition',
+                'deployment': 'diagnostic two-forward upper-bound design, no exported model'})
         for handle in handles:
             handle.remove()
-        del model, criterion, teacher, ema, optimizer
+        del model, criterion, teacher, protected, ema, optimizer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     write_json(args.output / 'complete.json', {'kind': 'disposable_learning_diagnostic', 'steps': args.steps,
@@ -295,7 +322,7 @@ def fit(args, source_args, checkpoint, parent, manifest, files, identity):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('scores', 'scores-task2', 'supervision', 'capacity', 'fit', 'distill'))
+    parser.add_argument('mode', choices=('scores', 'scores-task2', 'supervision', 'capacity', 'isolation', 'fit', 'distill'))
     parser.add_argument('--source-root', type=Path, default=ROOT / 'output/screening-s-8k')
     parser.add_argument('--comparison-root', type=Path, default=ROOT / 'output/task2-shared-s-8k')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'data/owod/s-owodb/split_manifest.json')
@@ -313,8 +340,8 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--report-interval', type=int, default=50)
     args = parser.parse_args(argv)
-    if args.score_phase != 'increment' and args.mode not in ('scores-task2', 'supervision', 'capacity'):
-        parser.error('--score-phase finetune requires scores-task2, supervision or capacity')
+    if args.score_phase != 'increment' and args.mode not in ('scores-task2', 'supervision', 'capacity', 'isolation'):
+        parser.error('--score-phase finetune requires scores-task2, supervision, capacity or isolation')
     if min(args.images, args.steps, args.batch_size, args.report_interval) < 1 or args.workers < 0:
         parser.error('Invalid diagnostic budget')
     import math
@@ -352,8 +379,8 @@ def main(argv=None):
     write_json(args.output / 'diagnostic_config.json', {**identity, 'arguments': vars(args) | {'manifest': str(args.manifest),
                'source_root': str(args.source_root), 'comparison_root': str(args.comparison_root),
                'screening': str(args.screening), 'output': str(args.output)}})
-    if args.mode in ('fit', 'distill', 'capacity'):
-        if args.mode == 'capacity':
+    if args.mode in ('fit', 'distill', 'capacity', 'isolation'):
+        if args.mode in ('capacity', 'isolation'):
             import copy
             saved = copy.deepcopy(saved)
             saved.lr = args.capacity_lr
