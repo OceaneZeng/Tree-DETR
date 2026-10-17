@@ -1,5 +1,21 @@
 # 从头运行正式全量 Task 1 基础检测控制组
 
+## 2026-10-17：control后处理修正
+
+前两轮已知AP全零的直接原因已定位：旧规则把 `1-max(sigmoid(known_logits))`
+作为unknown分数，使背景query占满Top-50。每轮4952张图输出247600个unknown，
+已知预测为零。修正后的监督control只输出已知类sigmoid候选，保留Top-50；
+没有训练过unknown检测头，不再凭低已知置信度伪造unknown物体。
+U-Recall为0是该control无unknown预测的预期限制，仍计算WI/A-OSE等适用指标。
+此更改仅影响control后处理，不改变训练loss、优化器或discovery评分。
+旧评估日志保留且标记为旧后处理结果，不能与修正后的曲线不加说明地混用。
+
+用户决定重新训练：v2启动脚本使用独立目录，不接受--resume或路径覆盖，
+不加载任何旧实验checkpoint。保留旧文件仅用于故障审计。
+初始化只使用相同DINO骨干预训练，其余部分重新初始化。
+启动前在原训练tmux中Ctrl+C结束旧进程并确认GPU已释放，再git pull运行下文命令。
+control_postprocess_version=known-sigmoid-topk-v2记录修正后的评分版本。
+
 目的：确认基础检测训练能力，再决定项目增量方法的正式配置。不再扩大历史小集诊断。
 使用 S-OWODB 作者 Task 1 清单与19类标签；schema-3 manifest及输入哈希校验。
 不加载旧Task1、筛选、拟合或隔离实验权重。DINO ResNet-50仅初始化骨干；
@@ -24,16 +40,12 @@ bash tools/owod/run_task1_control.sh
 ```
 
 校验失败先修复，不跳过哈希。启动器只生成Task1一阶段，结束后不进入Task2或GNN。
-输出：`output/task1-control-full/s-owodb/seed_42/stage_0/increment/`，含
+输出：`output/task1-control-v2-full/s-owodb/seed_42/stage_0/increment/`，含
 run_config.json、metrics.jsonl、checkpoint.pth、training_complete.json。
-完整控制台记录在 `output/task1-control-logs/console.log`，pipefail传播训练失败。
-保留已有输出，不覆盖旧NaN模型；新输出目录重复执行需使用严格resume。
+完整控制台记录在 `output/task1-control-v2-logs/console.log`，pipefail传播训练失败。
+已有输出目录拒绝覆盖；脚本禁止resume及额外配置覆盖，确保本次是全新实验。
+若v2后续发生中断，先核查原因，再单独处理v2权重的恢复，不使用旧实验权重。
 
-```bash
-bash tools/owod/run_task1_control.sh --resume
-```
-
-resume只恢复当前新实验的同manifest/配置检查点；若出现NaN，先查日志，不盲目重启。
 总loss非有限或梯度范数非有限立即终止，记录epoch与本rank图像ID；
 不会跳过坏batch、把NaN替换为0或在异常梯度后继续optimizer.step。
 这不是永不NaN的保证，matcher/前向计算更早报错仍以原始异常为准。

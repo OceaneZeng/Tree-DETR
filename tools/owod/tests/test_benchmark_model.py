@@ -6,6 +6,18 @@ from models.deformable_detr import PostProcess, SetCriterion
 
 
 class BenchmarkModelTests(unittest.TestCase):
+    def test_control_background_cannot_displace_known_detections(self):
+        logits = torch.full((1, 100, 91), -10.)
+        logits[0, 0, 1] = 2.
+        outputs = {'pred_logits': logits, 'pred_boxes': torch.full((1, 100, 4), .3)}
+        sizes = torch.tensor([[100, 100]])
+        legacy = PostProcess(known_ids=[1], max_detections=50)(outputs, sizes)[0]
+        self.assertTrue((legacy['labels'] == 91).all())
+        fixed = PostProcess(known_ids=[1], max_detections=50, include_unknown=False)(outputs, sizes)[0]
+        self.assertTrue((fixed['labels'] == 1).all())
+        self.assertAlmostEqual(float(fixed['scores'][0]), float(torch.tensor(2.).sigmoid()))
+        self.assertFalse(fixed['unknown_mask'].any())
+
     def test_unintroduced_logits_cannot_change_known_or_unknown_outputs(self):
         logits = torch.full((1, 2, 91), -20.)
         logits[..., 1] = torch.tensor([4., -4.])

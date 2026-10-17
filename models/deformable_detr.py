@@ -433,11 +433,12 @@ class SetCriterion(nn.Module):
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    def __init__(self, unknown_threshold=0.5, known_ids=None, max_detections=100):
+    def __init__(self, unknown_threshold=0.5, known_ids=None, max_detections=100, include_unknown=True):
         super().__init__()
         self.unknown_threshold = float(unknown_threshold)
         self.known_ids = known_ids
         self.max_detections = max_detections
+        self.include_unknown = include_unknown
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -457,8 +458,8 @@ class PostProcess(nn.Module):
         if self.known_ids is not None:
             categories = torch.tensor(self.known_ids, device=out_logits.device)
             prob = prob[..., categories]
-            unknown = 1. - prob.amax(-1)
-            if len(self.known_ids) < 80:
+            unknown = 1. - prob.amax(-1) if self.include_unknown else torch.zeros_like(prob[..., 0])
+            if self.include_unknown and len(self.known_ids) < 80:
                 categories = torch.cat([categories, categories.new_tensor([91])])
                 prob = torch.cat([prob, unknown[..., None]], -1)
         else:
@@ -554,7 +555,11 @@ def build(args):
     postprocessors = {'bbox': PostProcess(
         unknown_threshold=getattr(args, 'unknown_threshold', 0.5),
         known_ids=getattr(args, 'owod_known_class_ids', None),
-        max_detections=getattr(args, 'owod_max_detections', 100))}
+        max_detections=getattr(args, 'owod_max_detections', 100),
+        # A supervised control has no learned foreground/unknown head. Low
+        # known confidence is usually background, not evidence of an object.
+        include_unknown=bool(getattr(args, 'paper_baseline', '') or
+                             getattr(args, 'graph_routed_adapter', False)))}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
         if args.dataset_file == "coco_panoptic":

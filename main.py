@@ -295,6 +295,10 @@ def main(args):
         if args.owod_discovery:
             profile = {'method': 'discovery', 'unknown_score': 'objectness * novelty * (1 - max_known)',
                        'implementation': 'project_research_method', 'paper_baseline': False}
+        elif getattr(args, 'control_postprocess_version', None):
+            profile = {'method': 'supervised-control', 'unknown_score': 'none; no unknown predictions',
+                       'postprocess_version': args.control_postprocess_version,
+                       'implementation': 'project_control', 'paper_baseline': False}
         run_config.update({'owod_detector_profile': profile})
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')

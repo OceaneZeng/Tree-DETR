@@ -66,6 +66,8 @@ def configure_run(args):
     args.owod_max_detections = 50 if (manifest['protocol'] == 's-owodb'
                                    or getattr(args, 'owod_recipe', None) == 'ow-detr-paper') else 100
     args.paper_comparable_protocol = True
+    if not getattr(args, 'graph_routed_adapter', False) and not getattr(args, 'paper_baseline', ''):
+        args.control_postprocess_version = 'known-sigmoid-topk-v2'
     if getattr(args, 'screen_branch_checkpoint', ''):
         if not getattr(args, 'owod_screening', '') or args.owod_stage != 1:
             raise ValueError('Shared-parent branching is restricted to screening Task 2')
