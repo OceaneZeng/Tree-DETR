@@ -10,9 +10,8 @@ U-Recall为0是该control无unknown预测的预期限制，仍计算WI/A-OSE等�
 此更改仅影响control后处理，不改变训练loss、优化器或discovery评分。
 旧评估日志保留且标记为旧后处理结果，不能与修正后的曲线不加说明地混用。
 
-用户决定重新训练：v2启动脚本使用独立目录，不接受路径覆盖，
-不加载任何旧实验checkpoint。2026-10-20允许以--resume恢复同一v2实验。
-保留旧文件仅用于故障审计。
+用户决定重新训练：v2启动脚本使用独立目录，不接受--resume或路径覆盖，
+不加载任何旧实验checkpoint。保留旧文件仅用于故障审计。
 初始化只使用相同DINO骨干预训练，其余部分重新初始化。
 启动前在原训练tmux中Ctrl+C结束旧进程并确认GPU已释放，再git pull运行下文命令。
 control_postprocess_version=known-sigmoid-topk-v2记录修正后的评分版本。
@@ -26,7 +25,7 @@ control_postprocess_version=known-sigmoid-topk-v2记录修正后的评分版本�
 不是 ORE/OW-DETR 模型复现。沿用仓库已记录的 ow-detr-paper 训练参数：
 50 epochs、AdamW、LR2e-4、骨干LR2e-5、weight decay1e-4；现启动器lr_drop=50，
 因此本次50轮内无学习率下降。这是当前实现选择，不能宣称未核实的作者LR下降日程。
-两张3090（初始PCI顺序0,1；2026-10-20恢复改用1,2），每卡batch2，有效batch4，seed42，activation checkpointing开启。
+两张3090（PCI顺序0,1），每卡batch2，有效batch4，seed42，activation checkpointing开启。
 官方评估每轮执行，保留Top-50和作者AP50约定，报告适用的unknown指标；
 control未知分数是项目基线机制，不能当作有监督未知发现方法。
 
@@ -44,25 +43,8 @@ bash tools/owod/run_task1_control.sh
 输出：`output/task1-control-v2-full/s-owodb/seed_42/stage_0/increment/`，含
 run_config.json、metrics.jsonl、checkpoint.pth、training_complete.json。
 完整控制台记录在 `output/task1-control-v2-logs/console.log`，pipefail传播训练失败。
-已有输出目录必须显式--resume；脚本禁止额外配置覆盖。
-恢复时要求固定v2目录的计划和checkpoint.pth均存在且非空，保留启动器的
-计划一致性检查及训练入口的manifest、阶段、方法、超参数校验，不使用旧实验权重。
-
-## 2026-10-20：重启后恢复v2
-
-服务器于10月19日22:25关机，日志中断于epoch28的18000/22372步。
-在独立tmux会话中激活原环境并恢复（GPU 1、2，两卡配置不变）：
-
-```bash
-cd /home/top/disks/new-hdd/zhy/Tree-DETR
-conda activate /home/top/disks/new-hdd/conda_envs/tree-detr
-python tools/owod/manage_data.py verify --benchmark s-owodb --output-root data/owod && \
-  bash tools/owod/run_task1_control.sh --resume
-```
-
-日志追加到原console.log。--resume --dry-run仅打印基础训练计划，
-不会加载断点或执行完整续训校验；实际执行才向训练命令加入固定目录的--resume。
-恢复模型、优化器及调度器状态；未保存的epoch内进度需要重跑。
+已有输出目录拒绝覆盖；脚本禁止resume及额外配置覆盖，确保本次是全新实验。
+若v2后续发生中断，先核查原因，再单独处理v2权重的恢复，不使用旧实验权重。
 
 总loss非有限或梯度范数非有限立即终止，记录epoch与本rank图像ID；
 不会跳过坏batch、把NaN替换为0或在异常梯度后继续optimizer.step。
