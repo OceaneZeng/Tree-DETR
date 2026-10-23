@@ -11,7 +11,7 @@ from .discovery_memory import PrototypeMemory, AffinityGraph, initialize_from_de
 from .discovery_candidates import mine_candidates
 from util import box_ops
 
-DISCOVERY_VERSION = 3
+DISCOVERY_VERSION = 4
 
 
 class DiscoveryFFN(nn.Module):
@@ -185,11 +185,19 @@ class DiscoveryCriterion(nn.Module):
             semantic[batch, queries] = targets[batch]['labels'][matches]
         trusted = positive | pseudo | background
         weights = positive.float() + background.float() + confidence
-        # All ambiguous unlabelled queries are ignored by known-class negatives.
+        # Known-class membership and foreground existence are different targets.
+        # Keep standard one-to-one DETR supervision over ALL queries for released
+        # classes. An unmatched query is a negative for those classes, not a
+        # claim that its region contains no (possibly unknown) object. Masking
+        # this loss with discovery trust removes duplicate/background suppression.
+        # Objectness, novelty and routing retain the conservative evidence mask.
         prepared = dict(outputs)
-        prepared['query_label_weights'] = weights.detach()
-        prepared['aux_outputs'] = [dict(layer, query_label_weights=weights.detach())
-                                   for layer in outputs.get('aux_outputs', [])]
+        prepared.pop('query_label_weights', None)
+        prepared['aux_outputs'] = []
+        for layer in outputs.get('aux_outputs', []):
+            layer = dict(layer)
+            layer.pop('query_label_weights', None)
+            prepared['aux_outputs'].append(layer)
         losses = self.base(prepared, targets)
         losses['loss_objectness'] = balanced_bce(outputs['pred_objectness'], (positive | pseudo).float(), weights)
         losses['loss_unknown'] = balanced_bce(outputs['pred_novelty'], pseudo.float(), weights)
@@ -219,6 +227,10 @@ class DiscoveryCriterion(nn.Module):
                                    if anchor.any() else affinity.sum() * 0)
         losses['discovery_pseudo_count'] = pseudo.sum().float()
         losses['discovery_ignored_fraction'] = (~trusted).float().mean()
+        # ignored_fraction refers only to discovery heads as of version 4.
+        losses['discovery_known_supervised_fraction'] = weights.new_ones(())
+        losses['discovery_background_fraction'] = background.float().mean()
+        losses['discovery_positive_fraction'] = positive.float().mean()
         if self.training:
             accepted = positive | pseudo
             self.evidence = (outputs['query_features'][accepted].detach(), semantic[accepted].detach(),

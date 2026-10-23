@@ -293,7 +293,12 @@ def main(args):
         profile = ({'method': args.paper_baseline, 'implementation': 'controlled_adaptation',
                     'paper_comparable': False} if args.paper_baseline else detector_profile_dict())
         if args.owod_discovery:
-            profile = {'method': 'discovery', 'unknown_score': 'objectness * novelty * (1 - max_known)',
+            profile = {'method': 'discovery', 'unknown_score': 'objectness * novelty',
+                       'known_score': ('objectness * (1 - novelty) * softmax(known_logits)'
+                                       if args.discovery_scoring == 'hierarchical' else
+                                       'objectness * sigmoid(known_logits)'),
+                       'known_supervision': 'dense released-class focal loss; one-to-one matching',
+                       'discovery_supervision': 'trusted known, pseudo-unknown and background only',
                        'implementation': 'project_research_method', 'paper_baseline': False}
         elif getattr(args, 'control_postprocess_version', None):
             profile = {'method': 'supervised-control', 'unknown_score': 'none; no unknown predictions',

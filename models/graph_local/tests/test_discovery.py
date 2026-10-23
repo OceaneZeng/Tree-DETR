@@ -156,6 +156,29 @@ def test_ambiguous_queries_receive_no_known_background_gradient():
     assert logits.grad[0, 2, 1] > 0
 
 
+def test_discovery_preserves_dense_known_loss_without_labelling_ambiguous_objects_background():
+    outputs, targets = evidence()
+    # A moderate response is neither accepted unknown nor trusted background.
+    outputs['attention_feature'][:, :, :4, 6:] = .3
+    outputs['discovery_teacher']['attention_feature'] = outputs['attention_feature'].flip(-1)
+    outputs['aux_outputs'] = [dict(pred_logits=outputs['pred_logits'].detach().clone().requires_grad_(),
+                                  pred_boxes=outputs['pred_boxes'])]
+    base = SetCriterion(7, HungarianMatcher(), {}, ['labels', 'boxes'])
+    base.active_class_ids = [1]
+    reference = base(outputs, targets)
+    criterion = DiscoveryCriterion(base, None, args())
+    losses = criterion(outputs, targets)
+    assert torch.equal(losses['loss_ce'], reference['loss_ce'])
+    assert torch.equal(losses['loss_ce_0'], reference['loss_ce_0'])
+    (losses['loss_ce'] + losses['loss_ce_0']).backward(retain_graph=True)
+    for logits in (outputs['pred_logits'], outputs['aux_outputs'][0]['pred_logits']):
+        assert logits.grad[0, 2, 1] > 0  # Known-class negative still suppresses duplicates.
+        assert logits.grad[..., 6].count_nonzero() == 0  # Future class is never supervised.
+    losses['loss_objectness'].backward()
+    assert outputs['pred_objectness'].grad[0, 2] == 0  # Still ambiguous foreground existence.
+    assert losses['discovery_known_supervised_fraction'] == 1
+
+
 def test_prototypes_are_anonymous_and_refuse_forced_merge_when_full():
     memory = PrototypeMemory(4, capacity=1)
     first = memory.observe(torch.tensor([[1., 0, 0, 0]]), torch.tensor([-1]), torch.tensor([1.]))
