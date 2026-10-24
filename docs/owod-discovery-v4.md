@@ -1,5 +1,8 @@
 # Discovery v4：恢复已知类别的完整监督
 
+> 历史版本记录：2026-10-24之后当前启动器使用v5，不再按本文启动v4。
+> 当前说明见[owod-discovery-v5.md](owod-discovery-v5.md)。保留v4结果，不跨版本续训。
+
 2026-10-23，服务器 discovery v3 的 Task 1 完成第5轮时，Known AP50为12.78%，
 同轮control为45.78%。两者manifest、DINO权重、batch、学习率和seed相同。
 正式评估中的unknown输出183503/247600（74.1%），unknown precision为1.53%。

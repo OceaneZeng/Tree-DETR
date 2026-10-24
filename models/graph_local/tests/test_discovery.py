@@ -156,7 +156,7 @@ def test_ambiguous_queries_receive_no_known_background_gradient():
     assert logits.grad[0, 2, 1] > 0
 
 
-def test_discovery_preserves_dense_known_loss_without_labelling_ambiguous_objects_background():
+def test_discovery_preserves_dense_known_loss_and_rejects_unselected_proposals():
     outputs, targets = evidence()
     # A moderate response is neither accepted unknown nor trusted background.
     outputs['attention_feature'][:, :, :4, 6:] = .3
@@ -175,8 +175,44 @@ def test_discovery_preserves_dense_known_loss_without_labelling_ambiguous_object
         assert logits.grad[0, 2, 1] > 0  # Known-class negative still suppresses duplicates.
         assert logits.grad[..., 6].count_nonzero() == 0  # Future class is never supervised.
     losses['loss_objectness'].backward()
-    assert outputs['pred_objectness'].grad[0, 2] == 0  # Still ambiguous foreground existence.
+    assert outputs['pred_objectness'].grad[0, 2] > 0  # An unselected detection slot.
     assert losses['discovery_known_supervised_fraction'] == 1
+
+
+def test_novelty_is_conditional_on_selected_foreground_and_router_rejects_other_slots():
+    outputs, targets = evidence()
+    base = SetCriterion(7, HungarianMatcher(), {}, ['labels', 'boxes'])
+    base.active_class_ids = [1]
+    losses = DiscoveryCriterion(base, None, args())(outputs, targets)
+    (losses['loss_unknown'] + losses['loss_discovery_route']).backward()
+    assert outputs['pred_novelty'].grad[0, 0] > 0  # Known object.
+    assert outputs['pred_novelty'].grad[0, 1] < 0  # Accepted pseudo unknown.
+    assert outputs['pred_novelty'].grad[0, 2] == 0  # No object is not a known object.
+    router_grad = outputs['discovery_routes'][0].grad
+    assert router_grad[0, 2, 0] < 0  # Reject unselected slot via null/background route.
+    assert router_grad[0, 1, 2] < 0
+
+
+@pytest.mark.parametrize('all_empty', [False, True])
+def test_proposal_objectness_has_negative_gradients_without_saliency_background(all_empty):
+    from models.graph_local.discovery import proposal_supervision
+    positive = torch.tensor([[not all_empty, False, False, False]])
+    pseudo = torch.tensor([[False, not all_empty, False, False]])
+    confidence = torch.tensor([[0., .4, 0., 0.]])
+    foreground, novel_weights, proposal_weights = proposal_supervision(positive, pseudo, confidence)
+    logits = torch.full((1, 4), 6., requires_grad=True)
+    loss = balanced_bce(logits, foreground.float(), proposal_weights)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert (logits.grad[~foreground] > 0).all()
+    if not all_empty:
+        assert (logits.grad[foreground] < 0).all()
+        assert novel_weights.tolist() == [[1., pytest.approx(.4), 0., 0.]]
+    else:
+        novelty = torch.zeros(1, 4, requires_grad=True)
+        empty_loss = balanced_bce(novelty, pseudo.float(), novel_weights)
+        empty_loss.backward()
+        assert empty_loss == 0 and novelty.grad.count_nonzero() == 0
 
 
 def test_prototypes_are_anonymous_and_refuse_forced_merge_when_full():

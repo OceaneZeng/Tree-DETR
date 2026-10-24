@@ -60,7 +60,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         "loss_local_margin", "loss_off_projection", "loss_adapter_route",
                         "adapter_active_fraction", "loss_objectness", "loss_unknown",
                         "loss_discovery_route", "loss_discovery_consistency", "loss_affinity",
-                        "discovery_pseudo_count", "discovery_ignored_fraction"})
+                        "discovery_pseudo_count", "discovery_ignored_fraction",
+                        "discovery_known_supervised_fraction", "discovery_background_fraction",
+                        "discovery_positive_fraction", "discovery_proposal_negative_fraction",
+                        "discovery_objectness_supervised_fraction", "discovery_novelty_supervised_fraction"})
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
@@ -152,8 +155,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             current_model = model.module if hasattr(model, 'module') else model
             current_model.observe_training(criterion.evidence)
             update_ema(discovery_teacher, current_model)
-            metric_logger.update(discovery_pseudo_count=loss_dict['discovery_pseudo_count'].item(),
-                                 discovery_ignored_fraction=loss_dict['discovery_ignored_fraction'].item())
+
+        # Log diagnostics from the same all-rank reduction as losses. Do not
+        # hide new discovery diagnostics behind an explicit two-key allowlist.
+        metric_logger.update(**{key: value.item() for key, value in loss_dict_reduced.items()
+                                if key.startswith('discovery_')})
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced['class_error'])

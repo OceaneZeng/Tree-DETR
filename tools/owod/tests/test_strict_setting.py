@@ -22,10 +22,11 @@ def arguments(manifest, stage=0, phase='increment'):
 class StrictSettingTests(unittest.TestCase):
     def test_discovery_version_and_message_mode_cannot_change_in_chain(self):
         import copy
+        from models.graph_local.discovery import DISCOVERY_VERSION
         args = SimpleNamespace(owod_manifest='verified.json', owod_manifest_sha256='same',
                                owod_recipe='ow-detr-paper', owod_discovery=True,
-                               discovery_version=2, discovery_no_message=False)
-        for field, wrong in [('discovery_version', 1), ('discovery_no_message', True)]:
+                               discovery_version=DISCOVERY_VERSION, discovery_no_message=False)
+        for field, wrong in [('discovery_version', DISCOVERY_VERSION - 1), ('discovery_no_message', True)]:
             saved = copy.deepcopy(args)
             setattr(saved, field, wrong)
             with self.assertRaisesRegex(ValueError, field):

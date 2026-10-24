@@ -11,7 +11,7 @@ from .discovery_memory import PrototypeMemory, AffinityGraph, initialize_from_de
 from .discovery_candidates import mine_candidates
 from util import box_ops
 
-DISCOVERY_VERSION = 4
+DISCOVERY_VERSION = 5
 
 
 class DiscoveryFFN(nn.Module):
@@ -151,6 +151,22 @@ def balanced_bce(logits, targets, weights):
     return torch.stack(parts).mean() if parts else logits.sum() * 0
 
 
+def proposal_supervision(positive, pseudo, confidence):
+    """Supervise detection slots, not exhaustive foreground regions.
+
+    The GT matcher and deduplicated pseudo miner select positives; every other
+    slot is a negative objectness/router example. This trades possible missed
+    unknowns for learning to reject unselected and duplicate proposals.
+    Novelty is conditional on a selected object, so negatives do not teach it
+    that background is a known semantic object.
+    """
+    foreground = positive | pseudo
+    foreground_weights = torch.where(positive, torch.ones_like(confidence),
+                                     torch.where(pseudo, confidence, torch.zeros_like(confidence)))
+    proposal_weights = torch.where(foreground, foreground_weights, torch.ones_like(confidence))
+    return foreground, foreground_weights, proposal_weights
+
+
 class DiscoveryCriterion(nn.Module):
     def __init__(self, base, model, args):
         super().__init__()
@@ -183,14 +199,15 @@ class DiscoveryCriterion(nn.Module):
         for batch, (queries, matches) in enumerate(indices):
             positive[batch, queries] = True
             semantic[batch, queries] = targets[batch]['labels'][matches]
-        trusted = positive | pseudo | background
-        weights = positive.float() + background.float() + confidence
+        foreground, foreground_weights, proposal_weights = proposal_supervision(
+            positive, pseudo, confidence)
         # Known-class membership and foreground existence are different targets.
         # Keep standard one-to-one DETR supervision over ALL queries for released
         # classes. An unmatched query is a negative for those classes, not a
         # claim that its region contains no (possibly unknown) object. Masking
         # this loss with discovery trust removes duplicate/background suppression.
-        # Objectness, novelty and routing retain the conservative evidence mask.
+        # Novelty uses selected foreground only; objectness and routing learn
+        # one-to-one proposal selection, including unselected-query negatives.
         prepared = dict(outputs)
         prepared.pop('query_label_weights', None)
         prepared['aux_outputs'] = []
@@ -199,15 +216,15 @@ class DiscoveryCriterion(nn.Module):
             layer.pop('query_label_weights', None)
             prepared['aux_outputs'].append(layer)
         losses = self.base(prepared, targets)
-        losses['loss_objectness'] = balanced_bce(outputs['pred_objectness'], (positive | pseudo).float(), weights)
-        losses['loss_unknown'] = balanced_bce(outputs['pred_novelty'], pseudo.float(), weights)
+        losses['loss_objectness'] = balanced_bce(outputs['pred_objectness'], foreground.float(), proposal_weights)
+        losses['loss_unknown'] = balanced_bce(outputs['pred_novelty'], pseudo.float(), foreground_weights)
         route_target = torch.zeros_like(semantic)
         route_target[positive] = 1
         route_target[pseudo] = 2
         route_terms = []
         for logits in outputs['discovery_routes']:
             values = F.cross_entropy(logits.transpose(1, 2), route_target, reduction='none')
-            route_terms.append((values * weights).sum() / weights.sum().clamp_min(1))
+            route_terms.append((values * proposal_weights).sum() / proposal_weights.sum().clamp_min(1))
         losses['loss_discovery_route'] = torch.stack(route_terms).mean()
         consistency = outputs['query_features'].sum() * 0
         if teacher is not None:
@@ -226,15 +243,19 @@ class DiscoveryCriterion(nn.Module):
         losses['loss_affinity'] = (F.cross_entropy(affinity[anchor] / .1, semantic[anchor])
                                    if anchor.any() else affinity.sum() * 0)
         losses['discovery_pseudo_count'] = pseudo.sum().float()
-        losses['discovery_ignored_fraction'] = (~trusted).float().mean()
-        # ignored_fraction refers only to discovery heads as of version 4.
-        losses['discovery_known_supervised_fraction'] = weights.new_ones(())
+        # v5 ignores unselected slots for conditional novelty only. Classification,
+        # objectness and routing all receive dense proposal supervision.
+        losses['discovery_ignored_fraction'] = (~foreground).float().mean()
+        losses['discovery_known_supervised_fraction'] = confidence.new_ones(())
+        losses['discovery_objectness_supervised_fraction'] = (proposal_weights > 0).float().mean()
+        losses['discovery_novelty_supervised_fraction'] = (foreground_weights > 0).float().mean()
+        losses['discovery_proposal_negative_fraction'] = (~foreground).float().mean()
         losses['discovery_background_fraction'] = background.float().mean()
         losses['discovery_positive_fraction'] = positive.float().mean()
         if self.training:
             accepted = positive | pseudo
             self.evidence = (outputs['query_features'][accepted].detach(), semantic[accepted].detach(),
-                             weights[accepted].detach())
+                             foreground_weights[accepted].detach())
         else:
             self.evidence = None
         return losses

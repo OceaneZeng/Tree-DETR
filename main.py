@@ -298,7 +298,7 @@ def main(args):
                                        if args.discovery_scoring == 'hierarchical' else
                                        'objectness * sigmoid(known_logits)'),
                        'known_supervision': 'dense released-class focal loss; one-to-one matching',
-                       'discovery_supervision': 'trusted known, pseudo-unknown and background only',
+                       'discovery_supervision': 'dense selected-proposal objectness/router; foreground-only novelty',
                        'implementation': 'project_research_method', 'paper_baseline': False}
         elif getattr(args, 'control_postprocess_version', None):
             profile = {'method': 'supervised-control', 'unknown_score': 'none; no unknown predictions',
