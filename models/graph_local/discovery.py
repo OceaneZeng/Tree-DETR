@@ -10,6 +10,7 @@ from .routed_adapter import ClassAdapter
 from .discovery_memory import PrototypeMemory, AffinityGraph, initialize_from_deltas
 from .discovery_candidates import mine_candidates
 from util import box_ops
+from util.training_runtime import gather_evidence, foreach_ema_parameters, copy_model_buffers
 
 DISCOVERY_VERSION = 5
 
@@ -85,15 +86,11 @@ class DiscoveryDetector(nn.Module):
     def observe_training(self, evidence):
         if evidence is None:
             return
-        packed = [tensor.detach().cpu() for tensor in evidence]
+        packed = gather_evidence(evidence)
         distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
-        if distributed:
-            gathered = [None] * torch.distributed.get_world_size()
-            torch.distributed.all_gather_object(gathered, packed)
-            packed = [torch.cat([item[i] for item in gathered]) for i in range(3)]
         if not distributed or torch.distributed.get_rank() == 0:
             features, labels, weights = [tensor.to(self.memory.centers.device) for tensor in packed]
-            if any(int(label) >= 0 and int(label) not in self.known_ids for label in labels):
+            if any(label >= 0 and label not in self.known_ids for label in labels.cpu().tolist()):
                 raise ValueError('Prototype update received unreleased semantic labels')
             slots = self.memory.observe(features, labels, weights)
             for module in self.modules():
@@ -321,9 +318,6 @@ def update_ema(teacher, model, decay=.999):
     # Bias-free startup averages actual student iterates, then reaches .999.
     updates = int(teacher.ema_update_count)
     decay = min(decay, updates / (updates + 1))
-    for target, source in zip(teacher.parameters(), model.parameters()):
-        target.mul_(decay).add_(source, alpha=1 - decay)
-    target_buffers = dict(teacher.named_buffers())
-    for name, source in model.named_buffers():
-        target_buffers[name].copy_(source)
+    foreach_ema_parameters(teacher, model, decay)
+    copy_model_buffers(teacher, model)
     teacher.ema_update_count.add_(1)

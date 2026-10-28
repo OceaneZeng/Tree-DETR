@@ -17,7 +17,7 @@ python -u tools/owod/run_benchmark.py \
   --recipe ow-detr-paper --method discovery \
   --backbone-weights pretrained/dino_resnet50.pth \
   --output-dir output/tree-detr-s-v5-full \
-  --gpus 0,1 --nproc-per-node 2 --batch-size 2 --num-workers 4 \
+  --gpus 1,2 --nproc-per-node 2 --batch-size 2 --num-workers 4 \
   --seed 42 --activation-checkpointing \
   --graph-routing hard --graph-localization frozen \
   --discovery-scoring hierarchical "$@" \

@@ -425,7 +425,15 @@ def is_main_process():
 
 def save_on_master(*args, **kwargs):
     if is_main_process():
-        torch.save(*args, **kwargs)
+        from util.training_runtime import atomic_torch_save
+        destination = args[1] if len(args) > 1 else kwargs.get('f')
+        if isinstance(destination, (str, os.PathLike)):
+            options = dict(kwargs)
+            options.pop('f', None)
+            value = args[0] if args else options.pop('obj')
+            atomic_torch_save(value, destination, **options)
+        else:
+            torch.save(*args, **kwargs)
 
 
 def init_distributed_mode(args):

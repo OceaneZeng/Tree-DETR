@@ -16,8 +16,12 @@ class PrototypeMemory(nn.Module):
     @torch.no_grad()
     def observe(self, features, labels, weights, threshold=.8):
         assignments = []
-        for feature, label, weight in zip(features, labels, weights):
-            if not torch.isfinite(feature).all() or weight <= 0:
+        # Copy predicates once instead of synchronizing CUDA for every known
+        # object. Anonymous assignments and running updates remain sequential.
+        accepted = (torch.isfinite(features).all(-1) & ~(weights <= 0)).cpu().tolist()
+        label_values = labels.cpu().tolist()
+        for feature, label, weight, accept in zip(features, label_values, weights, accepted):
+            if not accept:
                 continue
             if label >= 0:
                 if label >= self.known_slots:

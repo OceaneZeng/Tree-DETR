@@ -28,6 +28,7 @@ from models import build_model
 from models.graph_local import (freeze_for_class_ids, inject_decoder_lora,
                                 merge_decoder_lora)
 from util.checkpoint import matching_state_dict
+from util.training_runtime import loader_worker_options
 from util.experiment_log import (archive_log_file, experiment_log_path,
                                  prepare_log_file, start_file_logging,
                                  stop_file_logging)
@@ -287,6 +288,12 @@ def main(args):
     if args.paper_baseline == 'cat' and not Path(args.cat_proposals).is_file():
         raise ValueError('CAT requires an existing --cat-proposals file')
     utils.init_distributed_mode(args)
+    args.training_runtime = {
+        'version': 1, 'worker_start_method': 'spawn' if args.num_workers > 0 else 'none',
+        'persistent_workers': False, 'checkpoint_save': 'atomic-replace',
+        'discovery_evidence': 'rank-ordered-tensors' if args.owod_discovery else 'not-used',
+        'ema': 'foreach-mul-add' if args.owod_discovery else 'not-used',
+    }
     file_log_state = start_file_logging(args, utils.is_main_process())
     if utils.is_main_process() and args.output_dir:
         run_config = vars(args).copy()
@@ -553,10 +560,10 @@ def main(args):
 
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                   pin_memory=True)
+                                   pin_memory=True, **loader_worker_options(args.num_workers))
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
-                                 pin_memory=True)
+                                 pin_memory=True, **loader_worker_options(args.num_workers))
 
     # lr_backbone_names = ["backbone.0", "backbone.neck", "input_proj", "transformer.encoder"]
     def match_name_keywords(n, name_keywords):
@@ -621,6 +628,12 @@ def main(args):
         else:
             checkpoint = load_local_checkpoint(args.resume)
         validate_checkpoint(args, checkpoint, resume=True)
+        if args.owod_manifest and not args.eval:
+            missing_state = {'model', 'optimizer', 'lr_scheduler', 'epoch'} - checkpoint.keys()
+            if args.owod_discovery and 'discovery_ema' not in checkpoint:
+                missing_state.add('discovery_ema')
+            if missing_state:
+                raise ValueError('Incomplete training checkpoint: ' + ', '.join(sorted(missing_state)))
         if args.paper_baseline:
             saved_args = checkpoint.get('args')
             if (getattr(saved_args, 'paper_baseline', None) != args.paper_baseline
@@ -629,14 +642,16 @@ def main(args):
                 raise ValueError('Resume requires an unconsolidated checkpoint from this method/stage')
             criterion.epoch = checkpoint['epoch']
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(
-            checkpoint['model'], strict=bool(args.paper_baseline or args.graph_routed_adapter))
+            checkpoint['model'], strict=bool(args.paper_baseline or args.graph_routed_adapter or args.owod_discovery))
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
             print('Missing Keys: {}'.format(missing_keys))
         if len(unexpected_keys) > 0:
             print('Unexpected Keys: {}'.format(unexpected_keys))
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            p_groups = copy.deepcopy(optimizer.param_groups)
+            # Retain only the LR metadata, not a deep copy of every GPU parameter.
+            p_groups = [{'lr': group['lr'], 'initial_lr': group['initial_lr']}
+                        for group in optimizer.param_groups]
             optimizer.load_state_dict(checkpoint['optimizer'])
             for pg, pg_old in zip(optimizer.param_groups, p_groups):
                 pg['lr'] = pg_old['lr']
@@ -747,6 +762,9 @@ def main(args):
                     'args': args,
                     **({'discovery_ema': discovery_teacher.state_dict()} if discovery_teacher is not None else {}),
                 }, checkpoint_path)
+            if utils.is_main_process():
+                print(f'Checkpoint saved: epoch={epoch} completed_epochs={epoch + 1} '
+                      f'path={checkpoint_paths[0]}', flush=True)
 
         should_evaluate = (not getattr(args, 'skip_eval', False) and
                             ((epoch + 1) % max(1, args.eval_interval) == 0
