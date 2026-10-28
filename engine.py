@@ -89,7 +89,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 ground_truth_iou=teacher_ground_truth_iou,
                 max_per_image=teacher_max_per_image)
         outputs = model(samples)
-        if discovery_teacher is not None:
+        # The criterion discards teacher predictions during warmup. Keep the
+        # teacher's EMA/prototype updates below, but skip this unused forward.
+        if discovery_teacher is not None and epoch >= getattr(criterion, 'warmup', 0):
             from models.graph_local.discovery_candidates import flip_samples
             with torch.no_grad():
                 outputs['discovery_teacher'] = discovery_teacher(flip_samples(samples))

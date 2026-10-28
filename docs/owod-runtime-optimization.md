@@ -1,5 +1,8 @@
 # Discovery v5 运行效率与续训可靠性（2026-10-28）
 
+本文记录运行实现版本 1。后续版本 2 的服务器对照测量、采用范围与续训边界见
+[运行优化 v2](owod-runtime-optimization-v2.md)。
+
 适用于正在运行的 `output/tree-detr-s-v5-full/s-owodb/seed_42/stage_0/increment/`。
 本次代码只在本地修改；服务器测试使用通过 SSH 标准输入传入的内存模块，
 未部署源文件、停止训练、写入实验目录或覆盖 checkpoint。

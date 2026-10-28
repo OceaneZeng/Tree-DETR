@@ -289,10 +289,12 @@ def main(args):
         raise ValueError('CAT requires an existing --cat-proposals file')
     utils.init_distributed_mode(args)
     args.training_runtime = {
-        'version': 1, 'worker_start_method': 'spawn' if args.num_workers > 0 else 'none',
+        'version': 2, 'worker_start_method': 'spawn' if args.num_workers > 0 else 'none',
         'persistent_workers': False, 'checkpoint_save': 'atomic-replace',
         'discovery_evidence': 'rank-ordered-tensors' if args.owod_discovery else 'not-used',
         'ema': 'foreach-mul-add' if args.owod_discovery else 'not-used',
+        'discovery_warmup_forward': 'skip-unused' if args.owod_discovery else 'not-used',
+        'adapter_activity': 'single-host-read' if args.graph_routed_adapter else 'not-used',
     }
     file_log_state = start_file_logging(args, utils.is_main_process())
     if utils.is_main_process() and args.output_dir:

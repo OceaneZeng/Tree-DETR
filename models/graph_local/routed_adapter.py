@@ -154,6 +154,9 @@ def mask_inactive_adapter_gradients(model):
     flags = torch.cat([(m.last_gates > 0).flatten(0, -2).any(0) for m in stages]).int()
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.all_reduce(flags, op=torch.distributed.ReduceOp.MAX)
+    # Read global activity once rather than synchronizing each CUDA scalar.
+    # Preserve grad=None for globally inactive factors (including AdamW state).
+    flags = flags.cpu().tolist()
     offset = 0
     for stage in stages:
         for adapter in stage.adapters:
